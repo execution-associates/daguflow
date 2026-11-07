@@ -1,4 +1,4 @@
-from daguflow import ITEM, Cron, SubDAG, dag, task
+from daguflow import Cron, dag, task
 
 
 @task
@@ -26,7 +26,5 @@ def digest(stories: list, min_score: int) -> str:
 def hn_digest(limit: int = 30, min_score: int = 100, api: str = "https://hacker-news.firebaseio.com/v0"):
     """This morning's Hacker News, best first."""
     ids = top_ids(api, limit)
-    with SubDAG("fetch", items=ids.output, max_concurrent=8,
-                params={"story_id": ITEM, "api": api}) as fetch:
-        story(fetch.params.api, fetch.params.story_id)
-    digest(fetch.results, min_score)
+    stories = story.partial(api=api).expand(story_id=ids, max_concurrent=8)
+    digest(stories, min_score)

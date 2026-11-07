@@ -6,7 +6,7 @@ from the Pi itself over SSH.
 
 from typing import Annotated, Literal
 
-from daguflow import ITEM, Cron, Range, SSHTarget, SubDAG, dag, env, on_failure, task
+from daguflow import Cron, Range, SSHTarget, dag, env, on_failure, task
 
 HUB = "http://192.168.1.60:8080"
 
@@ -59,9 +59,7 @@ def pi_temperature() -> float:
 def mood(mode: Literal["warm", "cool"] = "warm", level: Annotated[int, Range(0, 100)] = 30):
     """Every reachable light in one mood, four at a time"""
     found = list_lights(HUB)
-    with SubDAG("one", items=found.output, max_concurrent=4,
-                params={"light": ITEM, "mode": mode, "level": level}) as one:
-        set_light(HUB, one.params.light, one.params.mode, one.params.level)
+    set_light.partial(hub=HUB, mode=mode, level=level).expand(light=found, max_concurrent=4)
     with on_failure():
         set_light.override(name="reset")(HUB, "all", "warm", 50)
 

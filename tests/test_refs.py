@@ -1,6 +1,6 @@
 import pytest
 
-from daguflow import ITEM, ParamRef, Ref, ctx, env, var
+from daguflow import ParamRef, Ref, ctx, env, var
 
 
 def test_render_forms():
@@ -15,7 +15,6 @@ def test_namespaces():
     assert str(env.PI_USER) == "${env.PI_USER}"
     assert str(ctx.run.id) == "${context.run.id}"
     assert str(var("HOME_PI_USER")) == "${HOME_PI_USER}"
-    assert str(ITEM.light) == "${ITEM.light}"
 
 
 def test_paths():
@@ -38,3 +37,9 @@ def test_refs_refuse_python_branching():
     with pytest.raises(TypeError, match="preconditions"):
         if ParamRef("mode"):
             pass
+
+
+def test_item_is_not_part_of_the_api():
+    import daguflow
+
+    assert not hasattr(daguflow, "ITEM")

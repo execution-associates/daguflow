@@ -234,6 +234,10 @@ class Step:
 
     # -- outputs ------------------------------------------------------------
 
+    def _task_input(self) -> Ref:
+        """What a @task receives when this step is passed to it: its output."""
+        return self.output
+
     @property
     def output(self) -> Ref:
         """This step's captured stdout as a Ref (`${VAR}`).

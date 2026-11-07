@@ -14,7 +14,7 @@ $ pip install daguflow        # or: uv add daguflow
 Every morning, fetch Hacker News' top stories, eight at a time, and rank the ones worth reading:
 
 ```python
-from daguflow import ITEM, Cron, SubDAG, dag, task
+from daguflow import Cron, dag, task
 
 
 @task
@@ -42,14 +42,13 @@ def digest(stories: list, min_score: int) -> str:
 def hn_digest(limit: int = 30, min_score: int = 100, api: str = "https://hacker-news.firebaseio.com/v0"):
     """This morning's Hacker News, best first."""
     ids = top_ids(api, limit)
-    with SubDAG("fetch", items=ids.output, max_concurrent=8,
-                params={"story_id": ITEM, "api": api}) as fetch:
-        story(fetch.params.api, fetch.params.story_id)
-    digest(fetch.results, min_score)
+    stories = story.partial(api=api).expand(story_id=ids, max_concurrent=8)
+    digest(stories, min_score)
 ```
 
-`fetch` runs once per story ID, and `fetch.results` hands `digest` every story as a list. Each step
-is its own process, so one slow or failed fetch retries alone and shows in dagu's UI.
+`story.partial(api=api).expand(story_id=ids)` runs `story` once per ID, eight at a time, and `digest`
+receives every story as a list. Each run is its own process, so one slow or failed fetch retries alone and
+shows in dagu's UI.
 
 ```console
 $ daguflow build workflows -o dags/          # one YAML file per DAG
@@ -66,7 +65,8 @@ $ daguflow build workflows -o dags/ --check  # exit 1 with a diff if dags/ is st
 | `@task` call, `@task.bash` call, `actions.x.y(...).step()`, `shell(...)`, `step(...)`, `target.run(...)` | a step |
 | `a >> b`, `[a, b] >> c`, `chain(a, b, c)` | `depends:` |
 | reading another step's output | `depends:` added for you (dagu won't infer it) |
-| `with SubDAG("x"):` | a `---` local DAG in the same file and a `dag.run` step; `items=` adds `parallel:`, and `sub.results` gives a `@task` every child's result as a list |
+| `task.expand(x=...)`, `task.partial(...).expand(...)`, `task.expand_kwargs(...)` | a parallel `dag.run` step over a one-step local DAG |
+| `with SubDAG("x"):` | a `---` local DAG in the same file and a `dag.run` step; `items=` with `as_=` adds `parallel:`, and `sub.results` gives a `@task` every child's result as a list |
 | `with ForEach(items):` | an inline `foreach:` step |
 | `call_dag("other")` | `action: dag.run` against another file |
 | `with on_failure():` (and `on_success/exit/abort/init/wait`) | `handler_on:` |
@@ -91,7 +91,6 @@ Refs are build-time stand-ins for dagu's `${...}`. Format them in f-strings:
 | `step.output["field"]` | `${STEP.field}` |
 | `env.HOME` | `${env.HOME}` |
 | `ctx.run.id` | `${context.run.id}` |
-| `ITEM` | `${ITEM}` |
 | `var("NAME")` | `${NAME}` |
 
 These matter in the places a step is a shell command: `@task.bash`, `shell()` and `SSHTarget.run()`. A
@@ -130,6 +129,38 @@ remote shell splits it. Single-quoted, dagu leaves it unexpanded. Measured on da
       overrides, for values whose every source you trust.
 - **`@task.bash` is for steps whose job really is a shell command.** The function runs at build time and
   returns the command string (or an argv list); anything else is refused. `runs_on=` works as for `@task`.
+
+## Mapping: `.expand()`
+
+As in Airflow, `.expand()` runs a task once per item, in parallel, and the next task gets the results as a
+list, in item order:
+
+```python
+@task
+def resize(path: str, width: int) -> str: ...
+
+@task
+def manifest(paths: list) -> dict: ...
+
+@dag
+def thumbnails(width: int = 320):
+    paths = list_images("s3://photos/new")                       # a @task returning a list
+    small = resize.partial(width=width).expand(path=paths, max_concurrent=4)
+    manifest(small)
+```
+
+- **`expand(arg=...)`** takes a list, or a step whose output is a JSON list.
+- **Several mapped arguments** run every combination: `cell.expand(row=["a", "b"], col=[1, 2])` is four runs.
+  They take literal lists.
+- **`partial(...)`** fixes the arguments every run shares. Constants are built into the child; DAG params and
+  step outputs are passed to it.
+- **`expand_kwargs(dicts)`** runs once per dict of keyword arguments, from a literal list or from a step.
+  A key a dict leaves out takes the function's default.
+- `max_concurrent=` caps the parallel runs (dagu's default is 10, and its limit 1,000 items).
+- **dagu runs identical items once**, so `expand(x=[1, 1, 2])` is two runs and two results.
+- Underneath, each `.expand()` is a one-step local sub-DAG run by a parallel `dag.run` step. For a child with
+  several steps, write the `SubDAG` yourself: `with SubDAG("each", items=paths, as_="path") as each:`, use
+  `each.params.path` inside, and pass `each.results` on.
 
 ## Actions
 

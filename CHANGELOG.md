@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0
+
+- **`task.expand()`, `task.partial(...).expand()` and `task.expand_kwargs()`**, Airflow's dynamic task mapping:
+  one run per item, in parallel, and the next task gets the results as a list.
+- **Breaking: `ITEM` is gone.** A hand-written fan-out names its item: `SubDAG("x", items=..., as_="row")`,
+  then `x.params.row`; `call_dag(..., items=..., as_=...)` likewise. `SubDAG.item` is gone too.
+- The README's digest and the examples map with `.expand()`.
+
 ## 0.3.0
 
 - **`SubDAG.results`**: a fan-out's results, which a `@task` receives as a list of each child's output.

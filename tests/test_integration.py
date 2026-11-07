@@ -107,3 +107,15 @@ def test_hn_digest_fans_out_and_gathers_on_real_dagu(dagu_server, fake_hn):
     digest = json.loads(dagu_server.outputs("hn_digest", run_id)["digest"])
     assert digest == "  250  Show HN: daguflow\n  120  A post-mortem"
     assert len(dagu_server.sub_runs("hn_digest", run_id)) >= 3
+
+
+def test_mapping_carries_hostile_strings_products_and_runtime_dicts(dagu_server):
+    run_id, run = _run(dagu_server, "mapping")
+    nodes = [(n["step"]["name"], n["statusLabel"], n["step"].get("params"), [s.get("params") for s in n.get("subRuns") or []])
+             for n in run.nodes]
+    assert run.status == Status.SUCCEEDED, "\n".join(map(str, nodes)) + "\n" + "\n".join(
+        f"{s.get('dagName')}: {s}" for s in dagu_server.sub_runs("mapping", run_id))[:4000]
+    out = {k: json.loads(v) for k, v in dagu_server.outputs("mapping", run_id).items()}
+    assert out["literal"] == 'A B A B | IT\'S "QUOTED" & MORE IT\'S "QUOTED" & MORE'
+    assert out["grid"] == "X | X X | Y | Y Y"
+    assert out["runtime"] == 'IT\'S IT\'S | SAY "HI" & GO'

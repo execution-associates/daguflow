@@ -6,7 +6,7 @@ tests/test_integration.py runs these against the pinned dagu binary.
 from typing import Annotated, Literal
 
 from daguflow import (
-    DAG, ITEM, Cron, ForEach, Param, Range, SubDAG, call_dag, chain, ctx, dag, on_exit, on_failure,
+    DAG, Cron, ForEach, Param, Range, SubDAG, call_dag, chain, ctx, dag, on_exit, on_failure,
     shell, step, task,
 )
 from daguflow import actions
@@ -37,8 +37,8 @@ def describe(summary: dict) -> str:
 
 
 @task
-def square_of(n: int) -> int:
-    return n * n
+def square_of(n: int, label: str) -> dict:
+    return {"label": label, "square": n * n}
 
 
 @task
@@ -57,10 +57,7 @@ def pipeline(count: Annotated[int, Range(1, 20)] = 3, mode: Literal["fast", "slo
     summary = total(items)
     describe(summary)
 
-    with SubDAG("square", items=items.output, max_concurrent=2,
-                child_params={"n": "0", "label": ""}) as square:
-        square_of(square.params.n)
-    items >> square
+    square_of.expand_kwargs(items, max_concurrent=2)
 
     with ForEach(["red", "green"], as_="color", max_concurrent=2, name="colors") as colors:
         paint(colors.item)
@@ -74,6 +71,29 @@ def pipeline(count: Annotated[int, Range(1, 20)] = 3, mode: Literal["fast", "slo
         shell("echo run ${context.run.id} finished", name="cleanup")
     with on_failure():
         shell("echo failed >&2", name="alert")
+
+
+@task
+def shout(word: str, times: int = 1) -> str:
+    return " ".join([word.upper()] * times)
+
+
+@task
+def word_pairs() -> list:
+    return [{"word": "it's", "times": 2}, {"word": 'say "hi" & go', "times": 1}]
+
+
+@task
+def joined(parts: list) -> str:
+    return " | ".join(parts)
+
+
+@dag(labels=["examples"])
+def mapping():
+    """.expand() over a literal list, over every combination of two lists, and over dicts made at run time."""
+    joined.override(name="literal")(shout.partial(times=2).expand(word=["a b", 'it\'s "quoted" & more']))
+    joined.override(name="grid")(shout.expand(word=["x", "y"], times=[1, 2]))
+    joined.override(name="runtime")(shout.expand_kwargs(word_pairs()))
 
 
 with DAG("classic", description="The `with DAG(...)` style, operator objects and >> wiring",

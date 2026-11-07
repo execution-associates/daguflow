@@ -1,10 +1,12 @@
 """Context managers that group steps: SubDAG (a child DAG) and ForEach (an inline loop).
 
-    with SubDAG("apply", items=lights, params={"light": ITEM}, env=PI_ENV) as apply:
-        e = set_effect(light=apply.params.light)
-        c = set_color(light=apply.params.light)
+    with SubDAG("apply", items=lights.output, as_="light", max_concurrent=4) as apply:
+        e = set_effect(apply.params.light)
+        c = set_color(apply.params.light)
         e >> c
-    fetch >> apply >> report
+    report(apply.results)
+
+For one task per item, `task.expand(...)` writes this for you.
 
 The block's steps become a local child DAG: an extra `---` document in the
 parent's file, which dagu looks up first, by name. The `with` statement
@@ -19,8 +21,11 @@ from typing import Any
 
 from . import _context, params as _params
 from .dag import DAG
-from .refs import ITEM, Gathered, Ref
+from .refs import Gathered, Ref
 from .step import Action, Container, Step
+
+# dagu's name for the current item; daguflow binds it to a named param and never exposes it.
+_ITEM = Ref("ITEM")
 
 
 def _parallel(items: Any, max_concurrent: int | None) -> Any:
@@ -39,13 +44,17 @@ class SubDAG(Step):
                      otherwise.
     child_params:    the child's own param definitions (name -> default | Param).
     items:           a list or a Ref to a JSON array: run the child once per
-                     item, in parallel (`parallel:`). `ITEM` is the item.
+                     item, in parallel (`parallel:`).
+    as_:             the child param each item arrives in (required with items):
+                     `sub.params.<as_>` inside the block.
     max_concurrent:  cap on parallel children (dagu's default is 10).
     enqueue:         queue the child and move on, instead of waiting for it.
     env, dag_fields: the child DAG's own env and other top-level keys.
     Remaining keyword arguments configure the call step (retries, timeout,
     continue_on, preconditions, output, ...).
     """
+
+    _names_items = True  # Mapped binds its own items
 
     def __init__(
         self,
@@ -54,6 +63,7 @@ class SubDAG(Step):
         params: dict[str, Any] | None = None,
         child_params: dict[str, Any] | None = None,
         items: Any = None,
+        as_: str | None = None,
         max_concurrent: int | None = None,
         enqueue: bool = False,
         queue: str | None = None,
@@ -65,6 +75,16 @@ class SubDAG(Step):
         parent = _context.current_dag()
         if parent is None:
             raise RuntimeError("SubDAG must be opened inside a DAG")
+        params = dict(params or {})
+        if as_ is not None:
+            if items is None:
+                raise TypeError(f"SubDAG {name!r}: as_= names the item of a fan-out; pass items=")
+            if as_ in params:
+                raise TypeError(f"SubDAG {name!r}: {as_!r} is both the item (as_=) and a param")
+            params[as_] = _ITEM
+        elif items is not None and self._names_items:
+            raise TypeError(f"SubDAG {name!r}: name the item with as_=, e.g. as_=\"row\"; "
+                            "it arrives as sub.params.<as_>")
         if child_params is not None:
             defs = _params.from_spec(child_params)
         else:
@@ -99,11 +119,6 @@ class SubDAG(Step):
             raise ValueError(f"SubDAG {self.child.name!r} has no steps")
 
     @property
-    def item(self) -> Ref:
-        """The current item of a parallel fan-out: `${ITEM}` (`.field` for maps)."""
-        return ITEM
-
-    @property
     def params(self):
         """The child's params, for use inside the block: `sub.params.light`."""
         return self.child.params
@@ -134,20 +149,40 @@ class SubDAG(Step):
         return self.output["outputs"]
 
 
+class Mapped(SubDAG):
+    """What `task.expand(...)` returns: one child run per item. Passed to a @task, it is the list of results."""
+
+    _names_items = False
+
+    def _task_input(self) -> Gathered:
+        return self.results
+
+
 def call_dag(
     dag: str | DAG,
     name: str | None = None,
     *,
     params: dict[str, Any] | str | None = None,
     items: Any = None,
+    as_: str | None = None,
     max_concurrent: int | None = None,
     enqueue: bool = False,
     queue: str | None = None,
     **step_opts: Any,
 ) -> Step:
-    """Run another DAG (by name or file path under the DAGs dir) as a step."""
+    """Run another DAG (by name or file path under the DAGs dir) as a step.
+
+    With items=, it runs once per item; as_= names the param each item arrives
+    in. Without as_=, dagu passes a map item's keys as the params.
+    """
     target = dag.name if isinstance(dag, DAG) else dag
     with_: dict[str, Any] = {"dag": target}
+    if as_ is not None:
+        if items is None:
+            raise TypeError("as_= names the item of a fan-out; pass items=")
+        if isinstance(params, str):
+            raise TypeError("as_= needs params as a dict")
+        params = {**(params or {}), as_: _ITEM}
     if params:
         with_["params"] = params
     if queue is not None:

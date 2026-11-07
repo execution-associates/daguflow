@@ -146,8 +146,6 @@ consts = _Namespace("consts")
 ctx = _Namespace("context")
 """Run context: `ctx.run.id`, `ctx.dag.name`, `ctx.paths.work_dir`, ..."""
 
-ITEM = Ref("ITEM")
-"""The current item of a parallel sub-DAG fan-out (`${ITEM}`)."""
 
 
 def var(name: str) -> Ref:

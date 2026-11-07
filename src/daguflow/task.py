@@ -29,11 +29,13 @@ import base64
 import builtins
 import functools
 import inspect
+import itertools
 import json
 import textwrap
 from typing import Any, Callable
 
 from . import _context
+from .groups import _ITEM, Mapped
 from .refs import Gathered, Ref, iter_refs
 from .step import Step
 from .targets import ContainerTarget, SSHTarget
@@ -88,14 +90,16 @@ _daguflow_fn = {fn}
 def _daguflow_main():
     import contextlib, json, os, sys
     args = json.loads({constants!r})
-    for name, (as_text, fd, gather) in {ref_args!r}.items():
+    for name, (as_text, fd, gather, spread) in {ref_args!r}.items():
         if fd is None:
             raw = os.environ.get("DAGUFLOW_ARG_" + name, "")
         else:
             with os.fdopen(fd) as stream:
                 raw = stream.read()
             raw = raw[:-1] if raw.endswith("\\n") else raw
-        if gather is not None:
+        if spread:
+            args.update(json.loads(raw))
+        elif gather is not None:
             try:
                 outputs = json.loads(raw).get("outputs") or []
             except (ValueError, AttributeError):
@@ -210,13 +214,25 @@ class PythonTask:
         self.source = function_source(fn)
         self.signature = inspect.signature(fn)
 
+    def partial(self, **fixed: Any) -> PartialTask:
+        """Fix the arguments every mapped call shares: `t.partial(api=URL).expand(id=ids)`."""
+        return PartialTask(self, fixed)
+
+    def expand(self, *, max_concurrent: int | None = None, **mapped: Any) -> Step:
+        """One run per item, in parallel. See PartialTask.expand."""
+        return PartialTask(self, {}).expand(max_concurrent=max_concurrent, **mapped)
+
+    def expand_kwargs(self, items: Any, *, max_concurrent: int | None = None) -> Step:
+        """One run per dict of arguments. See PartialTask.expand_kwargs."""
+        return PartialTask(self, {}).expand_kwargs(items, max_concurrent=max_concurrent)
+
     def override(self, **opts: Any) -> PythonTask:
         merged = {"runs_on": self.runs_on, "python": self.python, "deps": self.deps,
                   "name": self.task_name, "unsafe_args": self.unsafe_args,
                   "decoder": self.decoder, **self.opts, **opts}
         return PythonTask(self.fn, **merged)
 
-    def script(self, constants: dict[str, Any], ref_args: dict[str, tuple[bool, int | None, str | None]]) -> str:
+    def script(self, constants: dict[str, Any], ref_args: dict[str, tuple[bool, int | None, str | None, bool]]) -> str:
         try:
             encoded = json.dumps(constants, sort_keys=True)
         except TypeError as e:
@@ -236,16 +252,23 @@ class PythonTask:
         return f"{prefix}{self.python} -"
 
     def __call__(self, *args: Any, **kwargs: Any) -> Step:
+        return self._call(args, kwargs, spread=None)
+
+    def _call(self, args: tuple, kwargs: dict, spread: Ref | None) -> Step:
+        """spread: a Ref to a JSON object whose keys become keyword arguments at run time."""
         container = _context.current()
         if container is None:
             raise RuntimeError(f"@task {self.task_name!r} was called outside a DAG")
-        bound = self.signature.bind(*args, **kwargs)
-        bound.apply_defaults()
+        if spread is None:
+            bound = self.signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+        else:
+            bound = self.signature.bind_partial(*args, **kwargs)  # the rest arrive at run time
         constants: dict[str, Any] = {}
         refs: dict[str, Ref] = {}
         for pname, value in bound.arguments.items():
             if isinstance(value, Step):
-                value = value.output
+                value = value._task_input()
             if isinstance(value, Ref):
                 refs[pname] = value
             elif any(True for _ in iter_refs(value)):
@@ -253,7 +276,10 @@ class PythonTask:
                                 f"not inside {pname}'s value")
             else:
                 constants[pname] = value
-        as_text = {p: self.signature.parameters[p].annotation in (str, "str") for p in refs}
+        if spread is not None:
+            refs[_SPREAD] = spread
+        as_text = {p: p in self.signature.parameters and self.signature.parameters[p].annotation in (str, "str")
+                   for p in refs}
         gather = {p: r.key if isinstance(r, Gathered) else None for p, r in refs.items()}
         name = container.unique_name(self.task_name)
 
@@ -273,14 +299,14 @@ class PythonTask:
                 )
             fds = {p: 3 + i for i, p in enumerate(refs)}
             payload = base64.b64encode(
-                self.script(constants, {p: (as_text[p], fds[p], gather[p]) for p in refs}).encode()).decode()
+                self.script(constants, {p: (as_text[p], fds[p], gather[p], p == _SPREAD) for p in refs}).encode()).decode()
             redirects = "".join(f" {fd}<<'DAGUFLOW_EOF'" for fd in fds.values())
             bodies = "".join(f"\n{r}\nDAGUFLOW_EOF" for r in refs.values())
             command = f'{self._launcher(inline=True).format(payload=payload, decoder=self.decoder)}{redirects}{bodies}'
             step = self.runs_on.run(command, name, **self.opts)
         else:
             payload = base64.b64encode(
-                self.script(constants, {p: (as_text[p], None, gather[p]) for p in refs}).encode()).decode()
+                self.script(constants, {p: (as_text[p], None, gather[p], p == _SPREAD) for p in refs}).encode()).decode()
             env = {f"DAGUFLOW_ARG_{p}": r for p, r in refs.items()}
             command = f"echo {payload} | {self.decoder} | {self._launcher()}"
             extra = {"container": self.runs_on} if isinstance(self.runs_on, ContainerTarget) else {}
@@ -291,6 +317,131 @@ class PythonTask:
         step.output  # noqa: B018 - give it an output var so the return value is captured
         _link_inputs(step, list(refs.values()))
         return step
+
+
+def _child_dag_name(base: str) -> str:
+    """A name no other document in the file has: every local DAG becomes one."""
+    dag = _context.current_dag()
+    while dag.parent is not None:
+        dag = dag.parent
+    taken = {d.name for d in dag.all_dags()} | {s.name for s in _context.current().steps if s.name}
+    if base not in taken:
+        return base
+    n = 1
+    while f"{base}__{n}" in taken:
+        n += 1
+    return f"{base}__{n}"
+
+
+def _mapped_list(value: Any, arg: str) -> Any:
+    if isinstance(value, Step):
+        value = value._task_input()
+    if isinstance(value, Gathered):
+        raise TypeError(f"expand({arg}=...): a mapped task's results are not a list dagu can fan out over; "
+                        "pass them through a @task that returns the list")
+    if isinstance(value, Ref):
+        return value
+    if isinstance(value, (list, tuple)):
+        if any(True for _ in iter_refs(list(value))):
+            raise TypeError(f"expand({arg}=...): a literal list cannot hold step outputs; build it in a @task")
+        return list(value)
+    raise TypeError(f"expand({arg}=...) takes a list or a step's output, not {type(value).__name__}")
+
+
+# The child param a mapped run's keyword-argument dict arrives in.
+_SPREAD = "mapped_kwargs"
+
+
+class PartialTask:
+    """A @task with some arguments fixed, ready to map over the rest."""
+
+    def __init__(self, task: PythonTask, fixed: dict[str, Any]):
+        self.task = task
+        self.fixed = fixed
+
+    def expand(self, *, max_concurrent: int | None = None, **mapped: Any) -> Step:
+        """One run of the task per item, at most max_concurrent at once (dagu's default is 10).
+
+        One mapped argument takes a list or a step's output. Several take literal
+        lists and run every combination, as in Airflow. Passed to another @task,
+        the result is the list of each run's return value, in item order.
+        dagu runs identical items once.
+        """
+        if not mapped:
+            raise TypeError(f"expand() on {self.task.task_name!r} needs at least one mapped argument")
+        if len(mapped) == 1:
+            (arg, value), = mapped.items()
+            return self._fan_out(_mapped_list(value, arg), {arg: _ITEM}, max_concurrent)
+        lists = {arg: _mapped_list(value, arg) for arg, value in mapped.items()}
+        if any(isinstance(v, Ref) for v in lists.values()):
+            raise TypeError("expand() over several arguments needs literal lists; for run-time values, "
+                            "return the argument dicts from a @task and use expand_kwargs()")
+        combos = [dict(zip(lists, values)) for values in itertools.product(*lists.values())]
+        return self._fan_out(combos, {}, max_concurrent, spread=list(lists))
+
+    def expand_kwargs(self, items: Any, *, max_concurrent: int | None = None) -> Step:
+        """One run per dict of keyword arguments: a literal list of dicts, or a step that outputs one.
+
+        A key a dict leaves out takes the function's default, so dicts may differ.
+        """
+        items = _mapped_list(items, "kwargs")
+        keys: list[str] = []
+        if not isinstance(items, Ref):
+            if not items or not all(isinstance(i, dict) for i in items):
+                raise TypeError("expand_kwargs() takes a non-empty list of dicts")
+            keys = list(dict.fromkeys(k for i in items for k in i))
+            unknown = [k for k in keys if k not in self.task.signature.parameters]
+            if unknown:
+                raise TypeError(f"@task {self.task.task_name!r} has no argument(s) {', '.join(unknown)}")
+            for i, item in enumerate(items):
+                try:
+                    self.task.signature.bind(**{n: None for n in [*self.fixed, *item]})
+                except TypeError as e:
+                    raise TypeError(f"expand_kwargs() item {i}: {e}") from None
+        return self._fan_out(items, {}, max_concurrent, spread=keys)
+
+    def _fan_out(self, items: Any, per_item: dict[str, Ref], max_concurrent: int | None,
+                 spread: list[str] | None = None) -> Step:
+        """spread: each item is a dict of keyword arguments (these keys, when known at build time)."""
+        task = self.task
+        if _context.current_dag() is None:
+            raise RuntimeError(f"@task {task.task_name!r} was expanded outside a DAG")
+        params = task.signature.parameters
+        mapped_names = [*per_item, *(spread or [])]
+        names = [*self.fixed, *mapped_names]
+        unknown = [n for n in names if n not in params]
+        if unknown:
+            raise TypeError(f"@task {task.task_name!r} has no argument(s) {', '.join(unknown)}")
+        both = set(self.fixed) & set(mapped_names)
+        if both:
+            raise TypeError(f"@task {task.task_name!r}: {', '.join(sorted(both))} is both fixed and mapped")
+        if spread is None:  # names a missing required argument; dicts are checked above or at run time
+            task.signature.bind(**{n: None for n in names})
+        if _SPREAD in params:
+            raise TypeError(f"@task {task.task_name!r}: {_SPREAD!r} is reserved for mapped keyword arguments")
+        passed: dict[str, Any] = dict(per_item)
+        if spread is not None:
+            passed[_SPREAD] = _ITEM
+        constants: dict[str, Any] = {}
+        for name, value in self.fixed.items():
+            if isinstance(value, Step):
+                value = value._task_input()
+            if isinstance(value, Ref):
+                passed[name] = value  # child runs see only what they are passed
+            elif any(True for _ in iter_refs(value)):
+                raise TypeError(f"partial({name}=...): pass Refs as whole arguments")
+            else:
+                constants[name] = value
+        if isinstance(items, list) and any(isinstance(i, (dict, list)) for i in items):
+            # dagu turns every value of a literal map item into a string; a JSON list keeps the types.
+            items = json.dumps(items)
+        mapped = Mapped(_child_dag_name(task.task_name), params=passed, items=items,
+                        max_concurrent=max_concurrent)
+        with mapped:
+            child_args = {n: mapped.params[n] for n in passed if n != _SPREAD}
+            task._call((), {**constants, **child_args},
+                       spread=mapped.params[_SPREAD] if spread is not None else None)
+        return mapped
 
 
 class _TaskDecorator:

@@ -1,6 +1,6 @@
 import pytest
 
-from daguflow import DAG, ITEM, ForEach, SubDAG, call_dag, dag, shell
+from daguflow import DAG, ForEach, SubDAG, call_dag, dag, shell
 
 
 def test_subdag_becomes_a_local_document_and_a_call_step():
@@ -22,8 +22,7 @@ def test_subdag_becomes_a_local_document_and_a_call_step():
 def test_parallel_fan_out_and_outputs():
     with DAG("p") as d:
         listing = shell("echo '[1,2]'", name="list")
-        with SubDAG("each", items=listing.output, max_concurrent=3, params={"n": ITEM},
-                    output="EACH") as each:
+        with SubDAG("each", items=listing.output, as_="n", max_concurrent=3, output="EACH") as each:
             shell("echo ${n}", name="say")
         shell(f"echo {each.outputs}", name="after")
     entry, _ = d.documents()
@@ -118,7 +117,7 @@ def test_results_hands_a_task_each_childs_decoded_output():
     import subprocess
     import sys
 
-    from daguflow import ITEM, SubDAG, dag, task
+    from daguflow import SubDAG, dag, task
 
     @task
     def one(n: int) -> dict:
@@ -130,7 +129,7 @@ def test_results_hands_a_task_each_childs_decoded_output():
 
     @dag
     def fan():
-        with SubDAG("each", items=[1, 2, 3], params={"n": ITEM}) as each:
+        with SubDAG("each", items=[1, 2, 3], as_="n") as each:
             one(each.params.n)
         gather(each.results)
 
@@ -148,7 +147,7 @@ def test_results_hands_a_task_each_childs_decoded_output():
 def test_results_needs_a_fan_out_with_one_output():
     import pytest
 
-    from daguflow import ITEM, SubDAG, dag, shell
+    from daguflow import SubDAG, dag, shell
 
     with pytest.raises(TypeError, match="fan-out"):
         @dag
@@ -160,7 +159,25 @@ def test_results_needs_a_fan_out_with_one_output():
     with pytest.raises(TypeError, match="exactly one"):
         @dag
         def two():
-            with SubDAG("each", items=[1], params={"n": ITEM}) as each:
+            with SubDAG("each", items=[1], as_="n") as each:
                 shell("echo a", name="a", output="A")
                 shell("echo b", name="b", output="B")
             each.results
+
+
+def test_a_fan_out_names_its_item():
+    with DAG("d"):
+        with pytest.raises(TypeError, match="as_="):
+            SubDAG("each", items=[1, 2])
+        with pytest.raises(TypeError, match="items="):
+            SubDAG("one", as_="n")
+        with pytest.raises(TypeError, match="both"):
+            SubDAG("dup", items=[1], as_="n", params={"n": 1})
+
+
+def test_call_dag_fans_out_with_a_named_item():
+    with DAG("d") as d:
+        call_dag("hello", items=["a", "b"], as_="who", params={"greeting": "hi"})
+    step = d.to_dict()["steps"][0]
+    assert step["with"]["params"] == {"greeting": "hi", "who": "${ITEM}"}
+    assert step["parallel"] == ["a", "b"]
