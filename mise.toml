@@ -1,0 +1,37 @@
+[tasks.test]
+description = "Unit tests plus the integration tier (the pinned dagu release, a throwaway sshd), in an isb sandbox"
+dir = "{{config_root}}"
+run = """
+set -euo pipefail
+version="$(sed -n 's/^DAGU_VERSION = "\\(.*\\)"/\\1/p' src/daguflow/schema/__init__.py)"
+name="daguflow-test-$$"
+isb create "$name" --image dev-base --label owner=daguflow --idmap auto \
+  --volume "$PWD:/home/dev/daguflow:ro" >/dev/null
+trap 'isb rm -f "$name" >/dev/null' EXIT
+# DNS answers a few seconds after the start; wait for it rather than fail the first fetch.
+isb exec "$name" -- bash -c 'for i in $(seq 30); do getent hosts astral.sh >/dev/null && exit; sleep 1; done; exit 1'
+isb exec "$name" -- bash -lc "set -e
+  export DEBIAN_FRONTEND=noninteractive
+  (apt-get update -qq && apt-get install -y -qq openssh-server) >/dev/null 2>&1
+  curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
+  sh /home/dev/daguflow/tools/fetch-dagu.sh $version /opt/dagu
+  ~/.local/bin/uv venv -q /root/venv --python 3.12
+  VIRTUAL_ENV=/root/venv ~/.local/bin/uv pip install -q -e '/home/dev/daguflow[test]'
+  cd /home/dev/daguflow
+  DAGUFLOW_DAGU_BIN=/opt/dagu/dagu /root/venv/bin/python -m pytest -q -p no:cacheprovider"
+"""
+
+[tasks.gen]
+description = "Regenerate the action builders from the pinned schema (in an isb sandbox)"
+dir = "{{config_root}}"
+run = """
+set -euo pipefail
+name="daguflow-gen-$$"
+isb create "$name" --image dev-base --label owner=daguflow --idmap auto \
+  --volume "$PWD:/home/dev/daguflow:ro" >/dev/null
+trap 'isb rm -f "$name" >/dev/null' EXIT
+# The schema is downloaded on first use, and DNS answers a few seconds after the start.
+isb exec "$name" -- bash -c 'for i in $(seq 30); do getent hosts raw.githubusercontent.com >/dev/null && exit; sleep 1; done; exit 1'
+isb exec "$name" -- python3 /home/dev/daguflow/tools/gen_actions.py > src/daguflow/actions/_generated.py.new
+mv src/daguflow/actions/_generated.py.new src/daguflow/actions/_generated.py
+"""

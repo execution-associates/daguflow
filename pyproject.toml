@@ -1,0 +1,49 @@
+[project]
+name = "daguflow"
+version = "0.1.0"
+description = "Author dagu workflows in Python, Airflow-style: decorators for DAGs and tasks, context managers for sub-DAGs"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["dagu", "workflow", "dag", "airflow", "orchestration", "scheduler"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Distributed Computing",
+    "Typing :: Typed",
+]
+authors = [
+    { name = "Stephan Fitzpatrick", email = "stephan@knowsuchagency.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "jsonschema>=4.21",
+    "pyyaml>=6",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.urls]
+Homepage = "https://github.com/execution-associates/daguflow"
+Repository = "https://github.com/execution-associates/daguflow"
+Issues = "https://github.com/execution-associates/daguflow/issues"
+
+[project.scripts]
+daguflow = "daguflow.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9.5,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "dagu: needs the pinned dagu binary (DAGUFLOW_DAGU_BIN); skipped without it",
+]
