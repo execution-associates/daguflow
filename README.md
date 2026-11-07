@@ -158,9 +158,72 @@ def thumbnails(width: int = 320):
   A key a dict leaves out takes the function's default.
 - `max_concurrent=` caps the parallel runs (dagu's default is 10, and its limit 1,000 items).
 - **dagu runs identical items once**, so `expand(x=[1, 1, 2])` is two runs and two results.
-- Underneath, each `.expand()` is a one-step local sub-DAG run by a parallel `dag.run` step. For a child with
-  several steps, write the `SubDAG` yourself: `with SubDAG("each", items=paths, as_="path") as each:`, use
-  `each.params.path` inside, and pass `each.results` on.
+- Underneath, each `.expand()` is a one-step sub-DAG run in parallel. When each item needs several steps,
+  write the sub-DAG yourself.
+
+## Sub-DAGs
+
+`with SubDAG(...)` groups steps into a child DAG that dagu runs as one step of the parent. With `items=`, it
+runs once per item, in parallel. Here each top story gets two steps, fetching the story and then its first
+comment, four stories at a time:
+
+```python
+from daguflow import SubDAG, dag, task
+
+
+@task
+def top_ids(api: str, limit: int) -> list:
+    import json, urllib.request
+    with urllib.request.urlopen(f"{api}/topstories.json", timeout=10) as r:
+        return json.load(r)[:limit]
+
+
+@task(retries=3)
+def story(api: str, story_id: int) -> dict:
+    import json, urllib.request
+    with urllib.request.urlopen(f"{api}/item/{story_id}.json", timeout=10) as r:
+        s = json.load(r)
+    return {"title": s["title"], "score": s["score"], "kids": s.get("kids", [])}
+
+
+@task(retries=3)
+def first_comment(api: str, story: dict) -> dict:
+    import html, json, re, urllib.request
+    text = ""
+    for kid in story["kids"][:1]:
+        with urllib.request.urlopen(f"{api}/item/{kid}.json", timeout=10) as r:
+            text = html.unescape(re.sub(r"<[^>]+>", " ", json.load(r).get("text", "")))
+    return {"title": story["title"], "score": story["score"], "comment": " ".join(text.split())[:200]}
+
+
+@task
+def threads(stories: list) -> str:
+    best = sorted(stories, key=lambda s: -s["score"])
+    return "\n\n".join(f"{s['title']} ({s['score']})\n  > {s['comment'] or 'no comments yet'}" for s in best)
+
+
+@dag
+def hn_threads(limit: int = 10, api: str = "https://hacker-news.firebaseio.com/v0"):
+    """Each top story with its first comment: two steps per story, four stories at a time."""
+    ids = top_ids(api, limit)
+    with SubDAG("thread", items=ids, as_="story_id", params={"api": api}, max_concurrent=4) as thread:
+        s = story(thread.params.api, thread.params.story_id)
+        first_comment(thread.params.api, s)
+    threads(thread.results)
+```
+
+- **`items=` with `as_=`**: one child run per item, and the item arrives as the child param `as_` names,
+  `thread.params.story_id` inside the block. `items=` takes a list or a task.
+- **Children see only what they are passed.** A child does not inherit the parent's params, env or step
+  outputs: pass values with `params=`, and read them as `thread.params.<name>`. `env=` sets the child's own
+  env.
+- **`thread.results`** gives a `@task` each child's result as a list, in item order. A result is the
+  output of the child's last step, the one no other child step depends on.
+- The block is a step of the parent: it takes `>>`, `retries=`, `timeout=` and the rest, and
+  `max_concurrent=` caps the parallel runs.
+- **Without `items=`, a sub-DAG runs once.** It groups steps into their own run, with their own page in
+  dagu's UI. Sub-DAGs nest; each becomes another `---` document in the same YAML file.
+- `call_dag("other")` runs a DAG from another file the same way, with `items=` and `as_=` to fan out.
 
 ## Actions
 

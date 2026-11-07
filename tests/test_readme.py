@@ -22,3 +22,8 @@ def test_every_step_of_it_is_python(tmp_path):
     steps = [s for d in yaml.safe_load_all((tmp_path / "hn_digest.yaml").read_text()) for s in d["steps"]]
     assert [s["action"] for s in steps if "action" in s] == ["dag.run"]
     assert all(s["run"].endswith("| base64 -d | python3 -") for s in steps if "run" in s)
+
+
+def test_the_sub_dag_section_shows_examples_hn_threads_word_for_word():
+    blocks = re.findall(r"```python\n(.*?)```", (REPO / "README.md").read_text(), re.S)
+    assert (REPO / "examples" / "hn_threads.py").read_text() in blocks

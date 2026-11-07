@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1
+
+- README: a Sub-DAGs section, with `examples/hn_threads.py` (two steps per story), which the tests run on
+  real dagu.
+- `SubDAG.results` reads the child's last step when several steps have outputs, as every chain of `@task`s
+  does. It used to refuse.
+- `SubDAG(items=...)` takes a task directly, like `.expand()`.
+
 ## 0.4.0
 
 - **`task.expand()`, `task.partial(...).expand()` and `task.expand_kwargs()`**, Airflow's dynamic task mapping:

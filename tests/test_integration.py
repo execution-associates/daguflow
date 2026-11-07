@@ -77,6 +77,8 @@ def fake_hn():
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     stories = {1: ("Show HN: daguflow", 250), 2: ("Ask HN: dagu?", 40), 3: ("A post-mortem", 120), 4: ("Off", 999)}
+    kids = {1: [101, 103], 2: [102]}
+    comments = {101: "<p>Nice &amp; tidy.</p><p>Ship it.</p>", 102: "<i>Yes</i>", 103: "never read"}
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -84,8 +86,12 @@ def fake_hn():
                 body = [1, 2, 3, 4]
             else:
                 sid = int(self.path.rsplit("/", 1)[1].removesuffix(".json"))
-                title, score = stories[sid]
-                body = {"id": sid, "title": title, "score": score, "descendants": sid * 10}
+                if sid in comments:
+                    body = {"id": sid, "type": "comment", "text": comments[sid]}
+                else:
+                    title, score = stories[sid]
+                    body = {"id": sid, "title": title, "score": score, "descendants": sid * 10,
+                            "kids": kids.get(sid, [])}
             data = json.dumps(body).encode()
             self.send_response(200)
             self.send_header("Content-Length", str(len(data)))
@@ -119,3 +125,12 @@ def test_mapping_carries_hostile_strings_products_and_runtime_dicts(dagu_server)
     assert out["literal"] == 'A B A B | IT\'S "QUOTED" & MORE IT\'S "QUOTED" & MORE'
     assert out["grid"] == "X | X X | Y | Y Y"
     assert out["runtime"] == 'IT\'S IT\'S | SAY "HI" & GO'
+
+
+def test_hn_threads_runs_two_steps_per_story_and_gathers_the_last(dagu_server, fake_hn):
+    run_id, run = _run(dagu_server, "hn_threads", api=fake_hn, limit=3)
+    assert run.status == Status.SUCCEEDED, json.dumps(run.raw)[:3000]
+    out = json.loads(dagu_server.outputs("hn_threads", run_id)["threads"])
+    assert out == ("Show HN: daguflow (250)\n  > Nice & tidy. Ship it.\n\n"
+                   "A post-mortem (120)\n  > no comments yet\n\n"
+                   "Ask HN: dagu? (40)\n  > Yes")

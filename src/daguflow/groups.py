@@ -43,8 +43,8 @@ class SubDAG(Step):
                      them (with an empty default) unless child_params says
                      otherwise.
     child_params:    the child's own param definitions (name -> default | Param).
-    items:           a list or a Ref to a JSON array: run the child once per
-                     item, in parallel (`parallel:`).
+    items:           a list, or a step (or Ref) whose output is a JSON list: run
+                     the child once per item, in parallel (`parallel:`).
     as_:             the child param each item arrives in (required with items):
                      `sub.params.<as_>` inside the block.
     max_concurrent:  cap on parallel children (dagu's default is 10).
@@ -75,6 +75,8 @@ class SubDAG(Step):
         parent = _context.current_dag()
         if parent is None:
             raise RuntimeError("SubDAG must be opened inside a DAG")
+        if isinstance(items, Step):
+            items = items._task_input()
         params = dict(params or {})
         if as_ is not None:
             if items is None:
@@ -127,17 +129,22 @@ class SubDAG(Step):
     def results(self) -> Gathered:
         """Each child run's result, in item order, for a @task: it receives a list.
 
-        A result is the output of the child's one step that has an output (a
-        @task always has one), JSON-decoded. Only successful children report,
-        and dagu fails the fan-out when any child fails.
+        A result is the output of the child's last step: the one step with an
+        output that no other child step depends on (a @task always has an
+        output), JSON-decoded. Only successful children report, and dagu fails
+        the fan-out when any child fails.
         """
         if self.spec.get("parallel") is None:
             raise TypeError(f"SubDAG {self.child.name!r}: results needs a fan-out (items=); use .outputs")
-        outs = [s.spec["output"] for s in self.child.steps if isinstance(s.spec.get("output"), str)]
-        if len(outs) != 1:
-            raise TypeError(f"SubDAG {self.child.name!r}: results needs exactly one child step with an "
-                            f"output, found {outs or 'none'}")
-        return Gathered(self.output.expr, producer=self, key=outs[0])
+        steps = [s for s in self.child.steps if isinstance(s.spec.get("output"), str)]
+        upstream = {id(u) for s in self.child.steps for u in s.upstream if isinstance(u, Step)}
+        names = {u for s in self.child.steps for u in s.upstream if isinstance(u, str)}
+        last = [s for s in steps if id(s) not in upstream and s.name not in names] if len(steps) > 1 else steps
+        if len(last) != 1:
+            found = [s.name for s in last] or "none"
+            raise TypeError(f"SubDAG {self.child.name!r}: results reads the one last child step with an "
+                            f"output, found {found}; chain the steps or end the block with one step")
+        return Gathered(self.output.expr, producer=self, key=last[0].spec["output"])
 
     @property
     def outputs(self) -> Ref:

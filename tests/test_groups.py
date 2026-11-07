@@ -156,13 +156,43 @@ def test_results_needs_a_fan_out_with_one_output():
                 shell("echo hi", name="hi", output="HI")
             once.results
 
-    with pytest.raises(TypeError, match="exactly one"):
+    with pytest.raises(TypeError, match="one last child step"):
         @dag
         def two():
             with SubDAG("each", items=[1], as_="n") as each:
                 shell("echo a", name="a", output="A")
                 shell("echo b", name="b", output="B")
             each.results
+
+
+def test_results_reads_the_last_step_of_a_chain():
+    from daguflow import SubDAG, dag, task
+
+    @task
+    def first(n: int) -> dict:
+        return {"n": n}
+
+    @task
+    def second(row: dict) -> int:
+        return row["n"] * 10
+
+    @task
+    def total(xs: list) -> int:
+        return sum(xs)
+
+    @task
+    def make() -> list:
+        return [1, 2]
+
+    @dag
+    def chain():
+        with SubDAG("each", items=make(), as_="n") as each:
+            second(first(each.params.n))
+        total(each.results)
+
+    entry, _ = chain.documents()
+    assert entry["steps"][1]["parallel"] == "${MAKE}", "a task passes as items directly"
+    assert "'SECOND'" in _decoded_script(entry["steps"][2]["run"]), "gathers the last step, second"
 
 
 def test_a_fan_out_names_its_item():
