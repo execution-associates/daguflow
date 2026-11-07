@@ -1,9 +1,11 @@
 # daguflow
 
-Write [dagu](https://github.com/dagucloud/dagu) workflows in Python, the way Airflow does it: `@dag` and
-`@task` decorators, `>>` for dependencies, and context managers for sub-DAGs and loops. `daguflow build` turns
-them into the YAML dagu runs. Each file is checked against the schema of the dagu version daguflow pins
-(**v2.24.0**), so a typo fails at build time, not when dagu loads the file.
+Write [dagu](https://github.com/dagucloud/dagu) workflows in Python, the way Airflow's TaskFlow does it:
+`@dag` and `@task` decorators, and context managers for sub-DAGs and loops. A `@task` is a Python function
+that runs when the step runs. Its arguments arrive as JSON and its return value becomes the step's output,
+so passing one task's result to another is the dependency. `daguflow build` writes the YAML dagu schedules.
+Each file is checked against the schema of the dagu version daguflow pins (**v2.24.0**), so a typo fails at
+build time, not when dagu loads the file.
 
 ```console
 $ pip install daguflow        # or: uv add daguflow
@@ -11,32 +13,36 @@ $ pip install daguflow        # or: uv add daguflow
 
 ```python
 from typing import Annotated
-from daguflow import ITEM, Cron, Range, SSHTarget, SubDAG, dag, env, task
+from daguflow import ITEM, Cron, Range, SubDAG, dag, task
 
-pi = SSHTarget(user=env.PI_USER, host="192.168.1.50", key="/etc/dagu/ssh/id_ed25519",
-                   strict_host_key=True, known_host_file="/etc/dagu/ssh/known_hosts")
+HUB = "http://192.168.1.60:8080"
 
-@task(runs_on=pi)
-def list_lights():
-    return "lights.py list --json"
+@task
+def list_lights(hub: str) -> list:
+    import json, urllib.request
+    with urllib.request.urlopen(f"{hub}/lights", timeout=10) as resp:
+        return [light["name"] for light in json.load(resp) if light["reachable"]]
 
-@task(runs_on=pi)
-def set_level(light, level):
-    return f"lights.py brightness --light {light:q} --value {level}"
-
-# Runs on the Pi at run time. unsafe_args: its input is our own lights.py JSON.
-@task.python(runs_on=pi, python="/usr/bin/python3", unsafe_args=True)
-def count(listing: dict) -> int:
-    return len(listing["names"])
+@task
+def dim(hub: str, light: str, level: int) -> dict:
+    import json, urllib.request
+    with urllib.request.urlopen(f"{hub}/lights/{light}", timeout=10) as resp:
+        now = json.load(resp)["brightness"]
+    if now <= level:
+        return {"light": light, "dimmed": False, "brightness": now}
+    req = urllib.request.Request(f"{hub}/lights/{light}", method="PUT",
+                                 data=json.dumps({"brightness": level}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=10).close()
+    return {"light": light, "dimmed": True, "from": now, "brightness": level}
 
 @dag(schedule=Cron("30 22 * * *", tz="America/Los_Angeles"), labels=["lights"])
 def dim_each(level: Annotated[int, Range(0, 100)] = 20):
-    """Dim every light, four at a time."""
-    found = list_lights()
-    with SubDAG("one", items=found["names"], max_concurrent=4,
+    """Lower any light brighter than `level`, four at a time."""
+    found = list_lights(HUB)
+    with SubDAG("one", items=found.output, max_concurrent=4,
                 params={"light": ITEM, "level": level}) as one:
-        set_level(one.params.light, one.params.level)
-    one >> count(found)
+        dim(HUB, one.params.light, one.params.level)
 ```
 
 ```console
@@ -51,7 +57,7 @@ $ daguflow build workflows -o dags/ --check  # exit 1 with a diff if dags/ is st
 | `@dag` function / `with DAG("name"):` | one file, `<name>.yaml` (the filename is the name) |
 | function parameters | `params:`: plain defaults give `- value: 50`; `Literal`, `Annotated[.., Range/Pattern/Length/Doc]`, `Param(...)` or no default give rich definitions dagu enforces at start |
 | first docstring line / the rest | `description:` / the file's header comment |
-| `@task` call, `shell(...)`, `step(...)`, `target.run(...)`, `actions.x.y(...).step()` | a step |
+| `@task` call, `@task.bash` call, `actions.x.y(...).step()`, `shell(...)`, `step(...)`, `target.run(...)` | a step |
 | `a >> b`, `[a, b] >> c`, `chain(a, b, c)` | `depends:` |
 | reading another step's output | `depends:` added for you (dagu won't infer it) |
 | `with SubDAG("x"):` | a `---` local DAG in the same file and a `dag.run` step; `items=` adds `parallel:` |
@@ -82,6 +88,9 @@ Refs are build-time stand-ins for dagu's `${...}`. Format them in f-strings:
 | `ITEM` | `${ITEM}` |
 | `var("NAME")` | `${NAME}` |
 
+These matter in the places a step is a shell command: `@task.bash`, `shell()` and `SSHTarget.run()`. A
+`@task` never needs them: its arguments arrive as values.
+
 **Use `{x:q}` for free text in SSH commands.** For an SSH target, dagu replaces a double-quoted `"${x}"` with the
 value re-quoted as one shell word, so `Rock 'n' Roll (Live) & More` arrives as one argument. Unquoted, the
 remote shell splits it. Single-quoted, dagu leaves it unexpanded. Measured on dagu 2.16.2 and 2.24.0
@@ -89,21 +98,23 @@ remote shell splits it. Single-quoted, dagu leaves it unexpanded. Measured on da
 
 **SSH `with:` fields expand only scoped references.** Write `user=env.PI_USER`, never `"${PI_USER}"`.
 
-## `@task` and `@task.python`
+## `@task` and `@task.bash`
 
-- **`@task` runs at build time.** It returns a command string, an `Action`, or a `Step`, and calling it inside
-  a DAG adds the step. Decorator kwargs are step options (`output=`, `retries=`, `timeout=`, `continue_on=`,
-  ...). `runs_on=` takes an `SSHTarget` or `container(image)`. `task.override(name=...)` changes them for one
-  call. Calling a task twice names the second step `name__1`, as in Airflow.
-- **`@task.python` runs at run time.** The function's own source ships to wherever the step runs: the dagu
-  worker (`run:`), an SSH host, or a container.
+- **`@task` is Python that runs when the step runs.** The function's own source ships to wherever the step
+  runs: the dagu worker (`run:`), an SSH host (`runs_on=SSHTarget(...)`), or a container
+  (`runs_on=container(image)`).
   - Arguments go in as JSON. The return value comes back as JSON on stdout and becomes the step's output.
   - The function's own `print`s go to stderr, so they can't corrupt that output.
   - Passing another step (or its output) as an argument makes it upstream.
+  - Decorator kwargs are step options (`output=`, `retries=`, `timeout=`, `continue_on=`, ...), and
+    `task.override(name=...)` changes them for one call. Calling a task twice names the second step
+    `name__1`, as in Airflow.
   - `deps=["httpx"]` runs it through `uv run --with`.
   - **The function must be self-contained**: imports inside the body, no closures, no module globals. Build
-    fails and names any outside names it uses.
-  - **Python must exist where the step runs.** dagu's official image has none.
+    fails and names any outside names it uses. Pass configuration as arguments, or import your own package
+    where the step runs.
+  - **Python must exist where the step runs.** dagu's official image has none: build `FROM` it with
+    `python3` added, run the step in a container, or send it to a host that has Python.
   - **How run-time values arrive:**
     - Locally, through step `env:`, so values are never spliced into code.
     - Over SSH, each on its own file descriptor as a quoted heredoc, so quotes, `$` and JSON arrive byte for
@@ -111,6 +122,8 @@ remote shell splits it. Single-quoted, dagu leaves it unexpanded. Measured on da
       the host. **So build accepts only params dagu constrains**: an `enum`, a numeric type, or a `pattern`
       that admits no newline. Step outputs, env and unconstrained params are refused; `unsafe_args=True`
       overrides, for values whose every source you trust.
+- **`@task.bash` is for steps whose job really is a shell command.** The function runs at build time and
+  returns the command string (or an argv list); anything else is refused. `runs_on=` works as for `@task`.
 
 ## Actions
 

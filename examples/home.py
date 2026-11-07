@@ -1,81 +1,73 @@
-"""Lights over SSH, the shape of a real home-automation DAG set."""
+"""Home lights: dagu schedules, Python decides and acts.
+
+The lights hub's HTTP API is reached from the dagu worker; one reading comes
+from the Pi itself over SSH.
+"""
 
 from typing import Annotated, Literal
 
-from daguflow import ITEM, Cron, ForEach, Pattern, Range, SSHTarget, SubDAG, dag, env, on_failure, shell, task
+from daguflow import ITEM, Cron, Range, SSHTarget, SubDAG, dag, env, on_failure, task
 
-ROOT = env.PI_ROOT
+HUB = "http://192.168.1.60:8080"
 
-PI_ENV = {
-    "PI_USER": "${HOME_PI_USER}",
-    "PI_ROOT": "${HOME_PI_ROOT}",
-}
-
-pi = SSHTarget(
-    user=env.PI_USER,
-    host="192.168.1.50",
-    port=22,
-    key="/etc/dagu/ssh/id_ed25519",
-    strict_host_key=True,
-    known_host_file="/etc/dagu/ssh/known_hosts",
-)
+pi = SSHTarget(user=env.PI_USER, host="192.168.1.50", key="/etc/dagu/ssh/id_ed25519",
+               strict_host_key=True, known_host_file="/etc/dagu/ssh/known_hosts")
 
 
-def lights(args: str) -> str:
-    return f"/usr/bin/python3 {ROOT}/lights.py {args}"
+@task
+def list_lights(hub: str) -> list:
+    import json
+    import urllib.request
+
+    with urllib.request.urlopen(f"{hub}/lights", timeout=10) as resp:
+        return [light["name"] for light in json.load(resp) if light["reachable"]]
 
 
-@dag(labels=["lights", "shortcut"], env=PI_ENV)
-def set_light_effect(effect=""):
-    """Set every Nanoleaf light to a named effect
+@task
+def set_light(hub: str, light: str, mode: str, level: int) -> dict:
+    import json
+    import urllib.request
 
-    The free-text value is double-quoted with {effect:q}."""
-    pi.run(lights(f"effect --name {effect:q}"), name="set-effect", output="RESULT")
-
-
-@dag(schedule=Cron("* 15-22 * * *", tz="America/Los_Angeles"), labels=["lights", "schedule"],
-     env=PI_ENV, timeout=300)
-def schedule_lights(brightness=50, minutes_before=30):
-    """Good Vibes at 50% on every light, 30 minutes before sunset"""
-    pi.run(lights(f"sunset --brightness {brightness:bare} --minutes-before {minutes_before:bare}"),
-               name="sunset-check", output="RESULT")
+    ct = {"warm": 2700, "cool": 5000}[mode]
+    body = json.dumps({"on": True, "brightness": level, "ct": ct}).encode()
+    req = urllib.request.Request(f"{hub}/lights/{light}", data=body, method="PUT",
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.load(resp)
 
 
-@task(runs_on=pi)
-def list_lights():
-    return lights("list --json")
+@task
+def sunset_trigger(lat: float, lng: float, minutes_before: int) -> dict:
+    import datetime
+    import json
+    import urllib.request
+
+    with urllib.request.urlopen(f"https://api.sunrisesunset.io/json?lat={lat}&lng={lng}", timeout=10) as resp:
+        sunset = json.load(resp)["results"]["sunset"]
+    at = datetime.datetime.strptime(sunset, "%I:%M:%S %p") - datetime.timedelta(minutes=minutes_before)
+    return {"sunset": sunset, "trigger": at.strftime("%H:%M")}
 
 
-@task(runs_on=pi)
-def set_effect(light, name):
-    return lights(f"effect --light {light:q} --name {name}")
+# Runs on the Pi: the reading only exists there.
+@task(runs_on=pi, python="/usr/bin/python3")
+def pi_temperature() -> float:
+    with open("/sys/class/thermal/thermal_zone0/temp") as f:
+        return int(f.read()) / 1000
 
 
-@task(runs_on=pi)
-def set_color(light, ct: int):
-    return lights(f"color --light {light:q} --ct {ct}")
-
-
-# unsafe_args: its input is our own lights.py JSON, not a caller's text.
-@task.python(runs_on=pi, python="/usr/bin/python3", unsafe_args=True)
-def summarize(listing: dict) -> dict:
-    return {"count": len(listing.get("lights", []))}
-
-
-@dag(labels=["lights"], env=PI_ENV)
-def mood_per_light(mode: Literal["warm", "cool"] = "warm",
-                   level: Annotated[int, Range(0, 100)] = 30,
-                   label: Annotated[str, Pattern(r"^[A-Za-z ]*$")] = ""):
-    """One child run per light, four at a time"""
-    found = list_lights()
-    with SubDAG("apply", items=found.output["names"], max_concurrent=4,
-                params={"light": ITEM}, env=PI_ENV) as apply:
-        e = set_effect(light=apply.params.light, name="Solid")
-        c = set_color(light=apply.params.light, ct=2700)
-        e >> c
-    report = summarize(found)
-    apply >> report
-    with ForEach(["a", "b"], as_="room", max_concurrent=2) as rooms:
-        shell(f"echo {rooms.item}", name="say")
+@dag(labels=["lights"])
+def mood(mode: Literal["warm", "cool"] = "warm", level: Annotated[int, Range(0, 100)] = 30):
+    """Every reachable light in one mood, four at a time"""
+    found = list_lights(HUB)
+    with SubDAG("one", items=found.output, max_concurrent=4,
+                params={"light": ITEM, "mode": mode, "level": level}) as one:
+        set_light(HUB, one.params.light, one.params.mode, one.params.level)
     with on_failure():
-        shell("echo failed", name="notify")
+        set_light.override(name="reset")(HUB, "all", "warm", 50)
+
+
+@dag(schedule=Cron("0 6 * * *", tz="America/Los_Angeles"), labels=["lights", "schedule"])
+def plan_evening(minutes_before: Annotated[int, Range(0, 120)] = 30):
+    """When tonight's lights should come up, and how warm the Pi is"""
+    sunset_trigger(37.7749, -122.4194, minutes_before)
+    pi_temperature()

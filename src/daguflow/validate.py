@@ -1,6 +1,6 @@
 """Three checks for generated YAML, from cheapest to most faithful.
 
-1. check_documents: the vendored JSON Schema plus the document rules
+1. check_documents: the pinned JSON Schema plus the document rules
    `dagu validate` adds (entrypoint has no `name`, later documents have
    unique names, `steps` is a non-empty list). Runs on every build.
 2. with_binary: `dagu validate <file>` from the pinned dagu release.

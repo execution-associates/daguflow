@@ -3,10 +3,9 @@
     from daguflow import actions
     actions.http.request(method="GET", url="https://example.com").step("fetch")
 
-Every builtin action at the vendored dagu version has a builder (generated
+Every builtin action at the pinned dagu version has a builder (generated
 from the schema; see tools/gen_actions.py). Each returns an Action, which
-becomes a step through `.step(...)`, by being returned from a @task, or
-through `Step(action=...)`. `custom()` covers custom actions declared in
+becomes a step through `.step(...)` or `Step(action=...)`. `custom()` covers custom actions declared in
 `actions:` and remote ones (`owner/repo@v1`, `name@v1`, `source:...@v1`);
 `redis()` covers the `redis.<op>` family.
 """

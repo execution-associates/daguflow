@@ -1,4 +1,4 @@
-"""ssh.run steps and @task.python over SSH, on a real dagu against a real sshd.
+"""ssh.run steps and @task over SSH, on a real dagu against a real sshd.
 
 The free-text value goes through dagu's "${x}" re-quoting and the heredoc
 argument path exactly as it would to a remote host.
@@ -24,11 +24,11 @@ def test_ssh_quoting_and_python_over_ssh(dagu_server, built_examples, sshd):
     target = SSHTarget(user=sshd.user, host="127.0.0.1", port=sshd.port, key=sshd.key,
                        strict_host_key=True, known_host_file=sshd.known_hosts)
 
-    @task.python(runs_on=target, python=sys.executable)
+    @task(runs_on=target, python=sys.executable)
     def make() -> dict:
         return {"q": "it's \"quoted\"", "dollar": "$HOME ${PATH} $(id)", "back": "`id`", "amp": "a & b; c"}
 
-    @task.python(runs_on=target, python=sys.executable, unsafe_args=True)
+    @task(runs_on=target, python=sys.executable, unsafe_args=True)
     def echo_back(payload: dict, label: str) -> dict:
         return {"payload": payload, "label": label}
 

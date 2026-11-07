@@ -42,7 +42,7 @@ class Ref:
         # step adds that step to its `depends`.
         self.producer = producer
         # Set when the value can only be something safe to put in a shell
-        # word (an enum, a number, a pattern). See task.python's ssh rule.
+        # word (an enum, a number, a pattern). See @task's ssh rule.
         self.constraint = constraint
 
     def render(self) -> str:

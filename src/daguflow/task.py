@@ -1,23 +1,25 @@
-"""@task (build time) and @task.python (run time).
+"""@task (Python at run time) and @task.bash (a shell command, written at build time).
 
-@task runs the function while the DAG is being built. It returns what the
-step does: a command string, an Action, or a Step it made itself.
+@task ships the function's own source to wherever the step runs and calls it
+there. Arguments go in as JSON, the return value comes back as JSON on stdout
+(the step's output), and anything the function prints goes to stderr so it
+cannot corrupt that output.
 
-    @task(runs_on=pi, output="RESULT")
-    def set_power(action):
-        return f"/usr/bin/python3 {ROOT}/lights.py power --action {action}"
+    @task(runs_on=pi, python="/usr/bin/python3")
+    def cpu_temp() -> float:
+        with open("/sys/class/thermal/thermal_zone0/temp") as f:
+            return int(f.read()) / 1000
 
-@task.python ships the function's own source to wherever the step runs and
-calls it there, at run time. Arguments go in as JSON, the return value comes
-back as JSON on stdout (captured as the step's output), and anything the
-function prints goes to stderr so it cannot corrupt that output.
+The function must be self-contained: imports inside the body, no closures, no
+module globals. Build fails, naming the offenders, when it is not. Python must
+exist where the step runs.
 
-    @task.python(runs_on=pi, python="/usr/bin/python3")
-    def count(catalog: dict) -> int:
-        return len(catalog["effects"])
+@task.bash is for a step whose job really is a shell command. The function runs
+while the DAG is built and returns the command:
 
-The function must be self-contained: imports inside the body, no closures,
-no module globals. Build fails, naming the offenders, when it is not.
+    @task.bash(runs_on=pi)
+    def reboot() -> str:
+        return "sudo systemctl reboot"
 """
 
 from __future__ import annotations
@@ -33,14 +35,8 @@ from typing import Any, Callable
 
 from . import _context
 from .refs import Ref, iter_refs
-from .step import Action, Step
+from .step import Step
 from .targets import ContainerTarget, SSHTarget
-
-
-def _rename(step: Step, base: str) -> None:
-    container = step.container
-    step.name = None
-    step.name = container.unique_name(base) if container is not None else base
 
 
 def _link_inputs(step: Step, values: Any) -> None:
@@ -49,8 +45,8 @@ def _link_inputs(step: Step, values: Any) -> None:
             step.set_upstream(ref.producer)
 
 
-class TaskFunction:
-    """A @task-decorated function. Call it inside a DAG to add a step."""
+class BashTask:
+    """A @task.bash function: it runs at build time and returns the step's shell command."""
 
     def __init__(self, fn: Callable, *, runs_on: Any = None, name: str | None = None, **opts: Any):
         functools.update_wrapper(self, fn)
@@ -59,49 +55,31 @@ class TaskFunction:
         self.task_name = name or fn.__name__
         self.opts = opts
 
-    def override(self, **opts: Any) -> TaskFunction:
+    def override(self, **opts: Any) -> BashTask:
         """A copy with different options for one call: `t.override(name="b")(x)`."""
         merged = {"runs_on": self.runs_on, "name": self.task_name, **self.opts, **opts}
-        return TaskFunction(self.fn, **merged)
+        return BashTask(self.fn, **merged)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Step:
         container = _context.current()
         if container is None:
-            raise RuntimeError(f"@task {self.task_name!r} was called outside a DAG")
-        before = list(container.steps)
+            raise RuntimeError(f"@task.bash {self.task_name!r} was called outside a DAG")
         result = self.fn(*args, **kwargs)
-        created = [s for s in container.steps if all(s is not b for b in before)]
-        if isinstance(result, Step):
-            step = result
-            _rename(step, self.task_name)
-            step.configure(**self.opts)
-        elif created:
-            raise TypeError(
-                f"@task {self.task_name!r} created steps but returned {type(result).__name__}; "
-                "return the step (or use a SubDAG for several)"
-            )
+        if not isinstance(result, (str, list)):
+            raise TypeError(f"@task.bash {self.task_name!r} returned {type(result).__name__}; "
+                            "return a command string (or an argv list). Logic belongs in @task")
+        name = container.unique_name(self.task_name)
+        if isinstance(self.runs_on, SSHTarget):
+            step = self.runs_on.run(result, name, **self.opts)
+        elif isinstance(self.runs_on, ContainerTarget):
+            step = Step(name, run=result, container=self.runs_on, **self.opts)
         else:
-            step = self._make(result)
+            step = Step(name, run=result, **self.opts)
         _link_inputs(step, [*args, *kwargs.values()])
         return step
 
-    def _make(self, result: Any) -> Step:
-        name = _context.current().unique_name(self.task_name)
-        if isinstance(result, Action):
-            return Step(name, action=result, **self.opts)
-        if isinstance(result, (str, list)):
-            if isinstance(self.runs_on, SSHTarget):
-                return self.runs_on.run(result, name, **self.opts)
-            if isinstance(self.runs_on, ContainerTarget):
-                return Step(name, run=result, container=self.runs_on, **self.opts)
-            return Step(name, run=result, **self.opts)
-        raise TypeError(
-            f"@task {self.task_name!r} returned {type(result).__name__}; "
-            "return a command string, an Action or a Step"
-        )
 
-
-# -- @task.python ---------------------------------------------------------------
+# -- @task ----------------------------------------------------------------------
 
 _RUNNER = '''
 def _daguflow_main():
@@ -164,17 +142,17 @@ def function_source(fn: Callable) -> str:
     """The function's own text, without decorators, checked to be self-contained."""
     if fn.__code__.co_freevars:
         raise TypeError(f"{fn.__name__} closes over {', '.join(fn.__code__.co_freevars)}; "
-                        "@task.python functions must be self-contained")
+                        "@task functions must be self-contained")
     try:
         lines, _ = inspect.getsourcelines(fn)
     except (OSError, TypeError):
-        raise TypeError(f"@task.python needs {fn.__name__}'s source; define it in a .py file, "
+        raise TypeError(f"@task needs {fn.__name__}'s source; define it in a .py file, "
                         "not in a REPL or `python -c`") from None
     text = textwrap.dedent("".join(lines))
     tree = ast.parse(text)
     node = next(n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
     if isinstance(node, ast.AsyncFunctionDef):
-        raise TypeError(f"{fn.__name__} is async; @task.python takes plain functions")
+        raise TypeError(f"{fn.__name__} is async; @task takes plain functions")
     body = "\n".join(text.splitlines()[node.lineno - 1:node.end_lineno]) + "\n"
     scope = _Scope()
     scope.visit(ast.parse(body))
@@ -182,14 +160,14 @@ def function_source(fn: Callable) -> str:
     if free:
         raise TypeError(
             f"{fn.__name__} uses names from outside itself: {', '.join(sorted(free))}. "
-            "@task.python ships only the function's source: import inside the body "
+            "@task ships only the function's source: import inside the body "
             "and pass values as arguments"
         )
     return body
 
 
 class PythonTask:
-    """A @task.python-decorated function: its body runs at run time."""
+    """A @task function: its body runs at run time, where the step runs."""
 
     def __init__(
         self,
@@ -225,7 +203,7 @@ class PythonTask:
         try:
             encoded = json.dumps(constants, sort_keys=True)
         except TypeError as e:
-            raise TypeError(f"@task.python {self.task_name!r}: build-time arguments must be JSON: {e}") from None
+            raise TypeError(f"@task {self.task_name!r}: build-time arguments must be JSON: {e}") from None
         return self.source + _RUNNER.format(constants=encoded, ref_args=ref_args, fn=self.fn.__name__)
 
     def _launcher(self, inline: bool = False) -> str:
@@ -243,7 +221,7 @@ class PythonTask:
     def __call__(self, *args: Any, **kwargs: Any) -> Step:
         container = _context.current()
         if container is None:
-            raise RuntimeError(f"@task.python {self.task_name!r} was called outside a DAG")
+            raise RuntimeError(f"@task {self.task_name!r} was called outside a DAG")
         bound = self.signature.bind(*args, **kwargs)
         bound.apply_defaults()
         constants: dict[str, Any] = {}
@@ -254,7 +232,7 @@ class PythonTask:
             if isinstance(value, Ref):
                 refs[pname] = value
             elif any(True for _ in iter_refs(value)):
-                raise TypeError(f"@task.python {self.task_name!r}: pass Refs as whole arguments, "
+                raise TypeError(f"@task {self.task_name!r}: pass Refs as whole arguments, "
                                 f"not inside {pname}'s value")
             else:
                 constants[pname] = value
@@ -270,7 +248,7 @@ class PythonTask:
             loose = [p for p, r in refs.items() if r.constraint is None]
             if loose and not self.unsafe_args:
                 raise TypeError(
-                    f"@task.python {self.task_name!r} runs over ssh and takes unconstrained "
+                    f"@task {self.task_name!r} runs over ssh and takes unconstrained "
                     f"value(s) {', '.join(loose)}. Pass params with an enum, a numeric type or "
                     "a pattern that admits no newline, or pass unsafe_args=True if every "
                     "source of these values is trusted"
@@ -298,17 +276,17 @@ class PythonTask:
 
 
 class _TaskDecorator:
-    """`task` itself: `@task`, `@task(...)`, and `@task.python(...)`."""
+    """`task` itself: `@task`, `@task(...)`, `@task.bash` and `@task.bash(...)`."""
 
     def __call__(self, fn: Callable | None = None, /, **opts: Any) -> Any:
         if fn is not None:
-            return TaskFunction(fn, **opts)
-        return lambda f: TaskFunction(f, **opts)
-
-    def python(self, fn: Callable | None = None, /, **opts: Any) -> Any:
-        if fn is not None:
             return PythonTask(fn, **opts)
         return lambda f: PythonTask(f, **opts)
+
+    def bash(self, fn: Callable | None = None, /, **opts: Any) -> Any:
+        if fn is not None:
+            return BashTask(fn, **opts)
+        return lambda f: BashTask(f, **opts)
 
 
 task = _TaskDecorator()

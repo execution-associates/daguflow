@@ -27,7 +27,7 @@ class Action:
     """A named dagu action and its `with:` block, not yet a step.
 
     Builders in `daguflow.actions` return these; turn one into a step with
-    `.step(...)`, by returning it from a `@task`, or with `Step(action=...)`.
+    `.step(...)` or with `Step(action=...)`.
     """
 
     __slots__ = ("name", "with_")
@@ -114,7 +114,7 @@ class Step:
     """One dagu step.
 
     Keyword arguments are dagu's own step keys (`retry_policy`, `continue_on`,
-    `repeat_policy`, `signal_on_stop`, ...), checked against the vendored
+    `repeat_policy`, `signal_on_stop`, ...), checked against the pinned
     schema so a typo fails at build time rather than at dagu's load. A few
     Python conveniences translate: `retries` (int -> retry_policy, with
     `retry_interval` seconds between tries, default 5),
@@ -198,7 +198,7 @@ class Step:
         depends: Any = None,
         **fields: Any,
     ) -> Step:
-        """Set step options after creation (what @task's decorator kwargs do)."""
+        """Set step options after creation."""
         unknown = set(fields) - schema.step_fields()
         if unknown:
             raise TypeError(f"unknown dagu step key(s): {', '.join(sorted(unknown))}")

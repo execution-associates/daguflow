@@ -1,9 +1,9 @@
 """Where a step runs: an SSH host or a container image.
 
     pi = SSHTarget(user=env.PI_USER, host="192.168.1.50", key=..., ...)
-    pi.run("uptime", name="uptime", output="RESULT")      # an ssh.run step
-    @task(runs_on=pi)                                      # a build-time task over ssh
-    @task.python(runs_on=pi, python="/usr/bin/python3")    # a run-time Python task over ssh
+    @task(runs_on=pi, python="/usr/bin/python3")    # a Python function run on the host
+    @task.bash(runs_on=pi)                           # a shell command run on the host
+    pi.run("uptime", name="uptime", output="RESULT")  # the same, as a plain ssh.run step
 
 An SSHTarget is also what a DAG's top-level `ssh:` key takes
 (`DAG(..., ssh=pi)`), which makes every step without an action run on

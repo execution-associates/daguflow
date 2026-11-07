@@ -18,12 +18,12 @@ def hello(who="world"):
     shell(f"echo hello {who}", name="greet", output="GREETING")
 
 
-@task.python
+@task
 def make_items(count: int) -> list:
     return [{"n": i, "label": f"item-{i}"} for i in range(count)]
 
 
-@task.python
+@task
 def total(items: list) -> dict:
     import math
 
@@ -32,8 +32,18 @@ def total(items: list) -> dict:
 
 
 @task
-def describe(summary):
-    return f"echo sum={summary['sum']}"
+def describe(summary: dict) -> str:
+    return f"sum={summary['sum']}"
+
+
+@task
+def square_of(n: int) -> int:
+    return n * n
+
+
+@task
+def paint(color: str) -> str:
+    return color.upper()
 
 
 @dag(labels=["examples"], schedule=Cron("0 6 * * 1-5", tz="America/Los_Angeles"), timeout=600,
@@ -49,11 +59,11 @@ def pipeline(count: Annotated[int, Range(1, 20)] = 3, mode: Literal["fast", "slo
 
     with SubDAG("square", items=items.output, max_concurrent=2,
                 child_params={"n": "0", "label": ""}) as square:
-        shell(f"echo $(( {square.params.n} * {square.params.n} ))", name="calc", output="SQUARE")
+        square_of(square.params.n)
     items >> square
 
     with ForEach(["red", "green"], as_="color", max_concurrent=2, name="colors") as colors:
-        shell(f"echo color {colors.item}", name="say")
+        paint(colors.item)
 
     checked = shell("test -n \"$HOME\" && echo ok", name="check", retries=2,
                     preconditions=[{"condition": "${mode}", "expected": "re:fast|slow"}])

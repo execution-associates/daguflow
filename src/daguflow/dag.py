@@ -42,7 +42,7 @@ class DAG(Container):
     """A dagu DAG. Use as `with DAG("name", ...) as dag:` or through `@dag`.
 
     Keyword arguments are dagu's own top-level keys, checked against the
-    vendored schema. Conveniences: `timeout` (seconds or timedelta ->
+    pinned schema. Conveniences: `timeout` (seconds or timedelta ->
     timeout_sec), `retries` (-> retry_policy.limit), `env` (dict -> ordered
     list), `tags` (-> labels; dagu deprecated `tags`), `params` (dict of
     name -> default or Param), and `doc` (text for the YAML header comment).

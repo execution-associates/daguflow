@@ -15,57 +15,49 @@ pi = SSHTarget(user=env.U, host="10.0.0.1", port=22, key="/k", strict_host_key=T
                    known_host_file="/kh")
 
 
-@task(runs_on=pi, output="RESULT")
+@task.bash(runs_on=pi, output="RESULT")
 def power(action):
     return f"/usr/bin/python3 lights.py power --action {action}"
 
 
-@task
-def http_get(url):
-    return actions.http.request(method="GET", url=url)
-
-
-@task
-def makes_its_own_step():
-    return shell("echo own", name="ignored", output="OWN")
-
-
-def test_build_time_task_forms():
+def test_bash_task_forms():
     @dag
     def d(action="toggle"):
         power(action)
         power.override(name="power-off")("off")
-        http_get("https://x")
-        makes_its_own_step()
         power("on")
 
     steps = d.to_dict()["steps"]
-    assert [s["name"] for s in steps] == ["power", "power-off", "http_get", "makes_its_own_step", "power__1"]
+    assert [s["name"] for s in steps] == ["power", "power-off", "power__1"]
     assert steps[0]["action"] == "ssh.run"
     assert steps[0]["with"]["command"] == "/usr/bin/python3 lights.py power --action ${action}"
     assert steps[0]["with"]["user"] == "${env.U}" and steps[0]["output"] == "RESULT"
-    assert steps[2] == {"name": "http_get", "action": "http.request",
-                        "with": {"method": "GET", "url": "https://x"}}
-    assert steps[3]["run"] == "echo own" and steps[3]["output"] == "OWN"
+
+
+def test_bash_task_returns_a_command_and_nothing_else():
+    @task.bash
+    def number():
+        return 42
+
+    @task.bash
+    def an_action():
+        return actions.http.request(method="GET", url="https://x")
+
+    with DAG("d"):
+        for t in (number, an_action):
+            with pytest.raises(TypeError, match="command string"):
+                t()
 
 
 def test_task_outside_a_dag():
     with pytest.raises(RuntimeError):
         power("x")
-
-
-def test_task_returning_garbage():
-    @task
-    def bad():
-        return 42
-
-    with DAG("d"):
-        with pytest.raises(TypeError, match="command string"):
-            bad()
+    with pytest.raises(RuntimeError):
+        add(1, 2)
 
 
 def test_passing_a_step_links_it():
-    @task
+    @task.bash
     def consume(thing):
         return f"echo {thing}"
 
@@ -77,7 +69,7 @@ def test_passing_a_step_links_it():
 
 
 def test_container_target():
-    @task(runs_on=container("alpine:3.20"))
+    @task.bash(runs_on=container("alpine:3.20"))
     def in_box():
         return "uname -a"
 
@@ -86,7 +78,7 @@ def test_container_target():
     assert d.to_dict()["steps"][0]["container"] == {"image": "alpine:3.20"}
 
 
-# -- @task.python -----------------------------------------------------------------
+# -- @task (Python at run time) ----------------------------------------------------
 
 GLOBAL_THING = 3
 
@@ -96,7 +88,7 @@ def test_python_tasks_must_be_self_contained():
         return GLOBAL_THING
 
     with pytest.raises(TypeError, match="GLOBAL_THING"):
-        task.python(uses_global)
+        task(uses_global)
 
     value = 1
 
@@ -104,7 +96,7 @@ def test_python_tasks_must_be_self_contained():
         return value
 
     with pytest.raises(TypeError, match="closes over"):
-        task.python(closure)
+        task(closure)
 
     def fine(x: int) -> int:
         import math
@@ -122,7 +114,7 @@ def _decoded(command: str) -> str:
     return base64.b64decode(payload).decode()
 
 
-@task.python
+@task
 def add(a: int, b: int, label: str = "sum") -> dict:
     print("noise")
     return {label: a + b}
@@ -148,7 +140,7 @@ def _sh_render(command: str, values: dict[str, str]) -> str:
 
 
 def test_ssh_python_task_passes_hostile_values_byte_for_byte():
-    @task.python(runs_on=pi, python=sys.executable, unsafe_args=True)
+    @task(runs_on=pi, python=sys.executable, unsafe_args=True)
     def echo_back(payload: dict, label: str) -> dict:
         return {"payload": payload, "label": label}
 
@@ -168,7 +160,7 @@ def test_ssh_python_task_passes_hostile_values_byte_for_byte():
 
 
 def test_ssh_python_task_refuses_unconstrained_params():
-    @task.python(runs_on=pi)
+    @task(runs_on=pi)
     def takes(text: str) -> str:
         return text
 
@@ -186,7 +178,7 @@ def test_ssh_python_task_refuses_unconstrained_params():
 
 
 def test_ssh_python_task_refuses_step_outputs_and_newline_patterns():
-    @task.python(runs_on=pi)
+    @task(runs_on=pi)
     def takes(value: str) -> str:
         return value
 
@@ -207,7 +199,7 @@ def test_ssh_python_task_refuses_step_outputs_and_newline_patterns():
 
     assert len(tight.to_dict()["steps"]) == 1
 
-    @task.python(runs_on=pi, unsafe_args=True)
+    @task(runs_on=pi, unsafe_args=True)
     def trusted(value: str) -> str:
         return value
 
@@ -219,7 +211,7 @@ def test_ssh_python_task_refuses_step_outputs_and_newline_patterns():
 
 
 def test_python_task_with_deps_uses_uv():
-    @task.python(deps=["httpx"], python="python3")
+    @task(deps=["httpx"], python="python3")
     def fetch() -> int:
         import httpx  # noqa: F401
 
@@ -231,7 +223,7 @@ def test_python_task_with_deps_uses_uv():
 
 
 def test_python_constants_must_be_json():
-    @task.python
+    @task
     def f(x: object) -> None:
         return None
 
