@@ -11,39 +11,45 @@ build time, not when dagu loads the file.
 $ pip install daguflow        # or: uv add daguflow
 ```
 
+Every morning, fetch Hacker News' top stories, eight at a time, and rank the ones worth reading:
+
 ```python
-from typing import Annotated
-from daguflow import ITEM, Cron, Range, SubDAG, dag, task
+from daguflow import ITEM, Cron, SubDAG, dag, task
 
-HUB = "http://192.168.1.60:8080"
 
 @task
-def list_lights(hub: str) -> list:
+def top_ids(api: str, limit: int) -> list:
     import json, urllib.request
-    with urllib.request.urlopen(f"{hub}/lights", timeout=10) as resp:
-        return [light["name"] for light in json.load(resp) if light["reachable"]]
+    with urllib.request.urlopen(f"{api}/topstories.json", timeout=10) as r:
+        return json.load(r)[:limit]
+
+
+@task(retries=3)
+def story(api: str, story_id: int) -> dict:
+    import json, urllib.request
+    with urllib.request.urlopen(f"{api}/item/{story_id}.json", timeout=10) as r:
+        s = json.load(r)
+    return {"title": s["title"], "score": s["score"], "comments": s.get("descendants", 0)}
+
 
 @task
-def dim(hub: str, light: str, level: int) -> dict:
-    import json, urllib.request
-    with urllib.request.urlopen(f"{hub}/lights/{light}", timeout=10) as resp:
-        now = json.load(resp)["brightness"]
-    if now <= level:
-        return {"light": light, "dimmed": False, "brightness": now}
-    req = urllib.request.Request(f"{hub}/lights/{light}", method="PUT",
-                                 data=json.dumps({"brightness": level}).encode(),
-                                 headers={"Content-Type": "application/json"})
-    urllib.request.urlopen(req, timeout=10).close()
-    return {"light": light, "dimmed": True, "from": now, "brightness": level}
+def digest(stories: list, min_score: int) -> str:
+    hot = sorted((s for s in stories if s["score"] >= min_score), key=lambda s: -s["score"])
+    return "\n".join(f"{s['score']:>5}  {s['title']}" for s in hot)
 
-@dag(schedule=Cron("30 22 * * *", tz="America/Los_Angeles"), labels=["lights"])
-def dim_each(level: Annotated[int, Range(0, 100)] = 20):
-    """Lower any light brighter than `level`, four at a time."""
-    found = list_lights(HUB)
-    with SubDAG("one", items=found.output, max_concurrent=4,
-                params={"light": ITEM, "level": level}) as one:
-        dim(HUB, one.params.light, one.params.level)
+
+@dag(schedule=Cron("0 8 * * *"))
+def hn_digest(limit: int = 30, min_score: int = 100, api: str = "https://hacker-news.firebaseio.com/v0"):
+    """This morning's Hacker News, best first."""
+    ids = top_ids(api, limit)
+    with SubDAG("fetch", items=ids.output, max_concurrent=8,
+                params={"story_id": ITEM, "api": api}) as fetch:
+        story(fetch.params.api, fetch.params.story_id)
+    digest(fetch.results, min_score)
 ```
+
+`fetch` runs once per story ID, and `fetch.results` hands `digest` every story as a list. Each step
+is its own process, so one slow or failed fetch retries alone and shows in dagu's UI.
 
 ```console
 $ daguflow build workflows -o dags/          # one YAML file per DAG
@@ -60,7 +66,7 @@ $ daguflow build workflows -o dags/ --check  # exit 1 with a diff if dags/ is st
 | `@task` call, `@task.bash` call, `actions.x.y(...).step()`, `shell(...)`, `step(...)`, `target.run(...)` | a step |
 | `a >> b`, `[a, b] >> c`, `chain(a, b, c)` | `depends:` |
 | reading another step's output | `depends:` added for you (dagu won't infer it) |
-| `with SubDAG("x"):` | a `---` local DAG in the same file and a `dag.run` step; `items=` adds `parallel:` |
+| `with SubDAG("x"):` | a `---` local DAG in the same file and a `dag.run` step; `items=` adds `parallel:`, and `sub.results` gives a `@task` every child's result as a list |
 | `with ForEach(items):` | an inline `foreach:` step |
 | `call_dag("other")` | `action: dag.run` against another file |
 | `with on_failure():` (and `on_success/exit/abort/init/wait`) | `handler_on:` |
@@ -162,11 +168,10 @@ actions.custom("dagucloud/duckdb@v1", query="select 1").step("duck")
 
 ## The dagu schema
 
-daguflow validates against the schema of one dagu release, pinned by commit and sha256, but does not ship
-it: dagu is GPL-3.0-or-later and daguflow is MIT. The first build downloads it from dagu's repository,
-checks the hash and caches it in `$XDG_CACHE_HOME/daguflow` (`~/.cache/daguflow`). Offline, run
-`daguflow schema fetch` while you still have a network, or set `DAGUFLOW_SCHEMA` to a copy; either way the
-hash is checked.
+daguflow validates against the schema of one dagu release, pinned by commit and sha256. The first build
+downloads it from dagu's repository and caches it in `$XDG_CACHE_HOME/daguflow` (`~/.cache/daguflow`). To
+build offline, run `daguflow schema fetch` once while online, or set `DAGUFLOW_SCHEMA` to a copy; either way
+the hash is checked.
 
 ## Client
 
@@ -204,4 +209,4 @@ the pinned dagu binary (`tools/fetch-dagu.sh` downloads it).
 
 ## License
 
-MIT. dagu's schema, which daguflow downloads at build time, is GPL-3.0-or-later and stays dagu's.
+MIT.

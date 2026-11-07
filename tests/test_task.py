@@ -231,3 +231,12 @@ def test_python_constants_must_be_json():
         with pytest.raises(TypeError, match="JSON"):
             f(object())
         assert isinstance(f({"a": [1, 2]}), Step)
+
+
+def test_a_task_may_share_a_name_with_the_runners_own_variables():
+    for fname in ("args", "name", "raw", "gather", "result", "json", "sys"):
+        src = f"def {fname}(x: int) -> int:\n    return x + 1\n"
+        script = src + __import__("daguflow.task", fromlist=["_RUNNER"])._RUNNER.format(
+            constants=json.dumps({"x": 1}), ref_args={}, fn=fname)
+        proc = subprocess.run([sys.executable, "-"], input=script, text=True, capture_output=True)
+        assert proc.returncode == 0 and json.loads(proc.stdout) == 2, (fname, proc.stderr)

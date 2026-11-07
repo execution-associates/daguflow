@@ -90,6 +90,16 @@ class Ref:
         )
 
 
+class Gathered(Ref):
+    """A parallel SubDAG's results. A @task receives a list: each successful child's `key` output, decoded."""
+
+    __slots__ = ("key",)
+
+    def __init__(self, expr: str, *, producer: Step, key: str):
+        super().__init__(expr, producer=producer)
+        self.key = key
+
+
 class ParamRef(Ref):
     """A DAG param. Renders `${name}`; `.scoped` renders `${params.name}`."""
 

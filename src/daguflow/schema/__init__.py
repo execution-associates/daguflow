@@ -1,7 +1,7 @@
 """The dagu DAG JSON Schema daguflow targets: one dagu release's, pinned by commit and sha256.
 
-dagu's schema is GPL-3.0-or-later, so daguflow does not ship it. The first build
-downloads it from dagu's repository, checks its sha256 and caches it under
+daguflow does not ship it: the first build downloads it from dagu's repository,
+checks its sha256 and caches it under
 $XDG_CACHE_HOME/daguflow (default ~/.cache/daguflow). Offline, run
 `daguflow schema fetch` once while online, or point DAGUFLOW_SCHEMA at a copy.
 """

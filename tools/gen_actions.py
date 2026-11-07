@@ -137,7 +137,7 @@ def builder(action: str, with_schema: dict | None, required_with: bool) -> tuple
         signature = ", ".join(["*", *params])
     else:
         signature = ", ".join(params)
-    # Names and types only: dagu's descriptions are GPL text, and this file ships under MIT.
+    # Names and types only: dagu's descriptions stay in dagu.
     required_names = [py_name(k) for k in props if k in required]
     summary = f"The `{action}` action" + (f"; requires {', '.join(required_names)}." if required_names else ".")
     if rest:

@@ -1,4 +1,4 @@
-"""The README's lead example builds, validates, and is Python all the way down."""
+"""The README leads with examples/hn_digest.py, word for word, and it is Python all the way down."""
 
 from __future__ import annotations
 
@@ -12,13 +12,13 @@ from daguflow.cli import main
 REPO = Path(__file__).resolve().parents[1]
 
 
-def test_the_lead_example_builds(tmp_path):
+def test_the_lead_example_is_examples_hn_digest():
     code = re.search(r"```python\n(.*?)```", (REPO / "README.md").read_text(), re.S).group(1)
-    (tmp_path / "readme_example.py").write_text(code)
-    out = tmp_path / "dags"
-    assert main(["build", str(tmp_path / "readme_example.py"), "-o", str(out), "--root", str(tmp_path)]) == 0
-    docs = list(yaml.safe_load_all((out / "dim_each.yaml").read_text()))
-    steps = [s for d in docs for s in d["steps"]]
-    assert [s.get("action") for s in steps if s.get("action")] == ["dag.run"]
-    python_steps = [s for s in steps if "run" in s]
-    assert python_steps and all(s["run"].endswith("| base64 -d | python3 -") for s in python_steps)
+    assert code == (REPO / "examples" / "hn_digest.py").read_text()
+
+
+def test_every_step_of_it_is_python(tmp_path):
+    assert main(["build", str(REPO / "examples" / "hn_digest.py"), "-o", str(tmp_path), "--root", str(REPO)]) == 0
+    steps = [s for d in yaml.safe_load_all((tmp_path / "hn_digest.yaml").read_text()) for s in d["steps"]]
+    assert [s["action"] for s in steps if "action" in s] == ["dag.run"]
+    assert all(s["run"].endswith("| base64 -d | python3 -") for s in steps if "run" in s)

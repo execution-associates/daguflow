@@ -34,7 +34,7 @@ import textwrap
 from typing import Any, Callable
 
 from . import _context
-from .refs import Ref, iter_refs
+from .refs import Gathered, Ref, iter_refs
 from .step import Step
 from .targets import ContainerTarget, SSHTarget
 
@@ -82,17 +82,34 @@ class BashTask:
 # -- @task ----------------------------------------------------------------------
 
 _RUNNER = '''
+_daguflow_fn = {fn}
+
+
 def _daguflow_main():
     import contextlib, json, os, sys
     args = json.loads({constants!r})
-    for name, (as_text, fd) in {ref_args!r}.items():
+    for name, (as_text, fd, gather) in {ref_args!r}.items():
         if fd is None:
             raw = os.environ.get("DAGUFLOW_ARG_" + name, "")
         else:
             with os.fdopen(fd) as stream:
                 raw = stream.read()
             raw = raw[:-1] if raw.endswith("\\n") else raw
-        if as_text:
+        if gather is not None:
+            try:
+                outputs = json.loads(raw).get("outputs") or []
+            except (ValueError, AttributeError):
+                outputs = []
+            args[name] = []
+            for out in outputs:
+                value = out.get(gather, next(iter(out.values())) if len(out) == 1 else None)
+                if isinstance(value, str):
+                    try:
+                        value = json.loads(value)
+                    except ValueError:
+                        pass
+                args[name].append(value)
+        elif as_text:
             args[name] = raw
         else:
             try:
@@ -100,7 +117,7 @@ def _daguflow_main():
             except ValueError:
                 args[name] = raw
     with contextlib.redirect_stdout(sys.stderr):
-        result = {fn}(**args)
+        result = _daguflow_fn(**args)
     json.dump(result, sys.stdout)
     sys.stdout.write("\\n")
 
@@ -199,7 +216,7 @@ class PythonTask:
                   "decoder": self.decoder, **self.opts, **opts}
         return PythonTask(self.fn, **merged)
 
-    def script(self, constants: dict[str, Any], ref_args: dict[str, tuple[bool, int | None]]) -> str:
+    def script(self, constants: dict[str, Any], ref_args: dict[str, tuple[bool, int | None, str | None]]) -> str:
         try:
             encoded = json.dumps(constants, sort_keys=True)
         except TypeError as e:
@@ -237,6 +254,7 @@ class PythonTask:
             else:
                 constants[pname] = value
         as_text = {p: self.signature.parameters[p].annotation in (str, "str") for p in refs}
+        gather = {p: r.key if isinstance(r, Gathered) else None for p, r in refs.items()}
         name = container.unique_name(self.task_name)
 
         if isinstance(self.runs_on, SSHTarget):
@@ -255,14 +273,14 @@ class PythonTask:
                 )
             fds = {p: 3 + i for i, p in enumerate(refs)}
             payload = base64.b64encode(
-                self.script(constants, {p: (as_text[p], fds[p]) for p in refs}).encode()).decode()
+                self.script(constants, {p: (as_text[p], fds[p], gather[p]) for p in refs}).encode()).decode()
             redirects = "".join(f" {fd}<<'DAGUFLOW_EOF'" for fd in fds.values())
             bodies = "".join(f"\n{r}\nDAGUFLOW_EOF" for r in refs.values())
             command = f'{self._launcher(inline=True).format(payload=payload, decoder=self.decoder)}{redirects}{bodies}'
             step = self.runs_on.run(command, name, **self.opts)
         else:
             payload = base64.b64encode(
-                self.script(constants, {p: (as_text[p], None) for p in refs}).encode()).decode()
+                self.script(constants, {p: (as_text[p], None, gather[p]) for p in refs}).encode()).decode()
             env = {f"DAGUFLOW_ARG_{p}": r for p, r in refs.items()}
             command = f"echo {payload} | {self.decoder} | {self._launcher()}"
             extra = {"container": self.runs_on} if isinstance(self.runs_on, ContainerTarget) else {}

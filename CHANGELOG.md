@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+- **`SubDAG.results`**: a fan-out's results, which a `@task` receives as a list of each child's output.
+- The README leads with a Hacker News digest (`examples/hn_digest.py`), which the tests run on real dagu.
+- Fixed: a `@task` named like one of the runner's own variables (`args`, `name`, `raw`, `result`, ...) failed
+  at run time.
+
 ## 0.2.0
 
 - **`@task` is the run-time Python task** (0.1.0's `@task.python`). The function runs where the step runs;

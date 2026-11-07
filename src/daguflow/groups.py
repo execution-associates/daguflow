@@ -19,7 +19,7 @@ from typing import Any
 
 from . import _context, params as _params
 from .dag import DAG
-from .refs import ITEM, Ref
+from .refs import ITEM, Gathered, Ref
 from .step import Action, Container, Step
 
 
@@ -107,6 +107,22 @@ class SubDAG(Step):
     def params(self):
         """The child's params, for use inside the block: `sub.params.light`."""
         return self.child.params
+
+    @property
+    def results(self) -> Gathered:
+        """Each child run's result, in item order, for a @task: it receives a list.
+
+        A result is the output of the child's one step that has an output (a
+        @task always has one), JSON-decoded. Only successful children report,
+        and dagu fails the fan-out when any child fails.
+        """
+        if self.spec.get("parallel") is None:
+            raise TypeError(f"SubDAG {self.child.name!r}: results needs a fan-out (items=); use .outputs")
+        outs = [s.spec["output"] for s in self.child.steps if isinstance(s.spec.get("output"), str)]
+        if len(outs) != 1:
+            raise TypeError(f"SubDAG {self.child.name!r}: results needs exactly one child step with an "
+                            f"output, found {outs or 'none'}")
+        return Gathered(self.output.expr, producer=self, key=outs[0])
 
     @property
     def outputs(self) -> Ref:

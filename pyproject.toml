@@ -1,6 +1,6 @@
 [project]
 name = "daguflow"
-version = "0.2.0"
+version = "0.3.0"
 description = "Author dagu workflows in Python, Airflow-style: decorators for DAGs and tasks, context managers for sub-DAGs"
 readme = "README.md"
 license = "MIT"

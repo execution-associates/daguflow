@@ -69,3 +69,41 @@ def test_nested_subdags(dagu_server):
     run_id, run = _run(dagu_server, "nested")
     assert run.status == Status.SUCCEEDED, json.dumps(run.raw)[:3000]
     assert dagu_server.sub_runs("nested", run_id)
+
+
+@pytest.fixture
+def fake_hn():
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    stories = {1: ("Show HN: daguflow", 250), 2: ("Ask HN: dagu?", 40), 3: ("A post-mortem", 120), 4: ("Off", 999)}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/topstories.json":
+                body = [1, 2, 3, 4]
+            else:
+                sid = int(self.path.rsplit("/", 1)[1].removesuffix(".json"))
+                title, score = stories[sid]
+                body = {"id": sid, "title": title, "score": score, "descendants": sid * 10}
+            data = json.dumps(body).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+
+
+def test_hn_digest_fans_out_and_gathers_on_real_dagu(dagu_server, fake_hn):
+    run_id, run = _run(dagu_server, "hn_digest", api=fake_hn, limit=3, min_score=100)
+    assert run.status == Status.SUCCEEDED, json.dumps(run.raw)[:3000]
+    digest = json.loads(dagu_server.outputs("hn_digest", run_id)["digest"])
+    assert digest == "  250  Show HN: daguflow\n  120  A post-mortem"
+    assert len(dagu_server.sub_runs("hn_digest", run_id)) >= 3

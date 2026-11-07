@@ -103,3 +103,64 @@ def test_foreach_inline_body():
     assert step["foreach"]["steps"][0]["run"] == "echo ${foreach.room} ${foreach.index}"
     assert step["foreach"]["steps"][1]["depends"] == "first"
     assert list(step["foreach"]) == ["items", "as", "max_concurrent", "steps", "collect"]
+
+
+def _decoded_script(command: str) -> str:
+    import base64
+    import re
+
+    return base64.b64decode(re.search(r"echo ([A-Za-z0-9+/=]+) \|", command).group(1)).decode()
+
+
+def test_results_hands_a_task_each_childs_decoded_output():
+    import json
+    import os
+    import subprocess
+    import sys
+
+    from daguflow import ITEM, SubDAG, dag, task
+
+    @task
+    def one(n: int) -> dict:
+        return {"n": n, "sq": n * n}
+
+    @task
+    def gather(rows: list) -> int:
+        return sum(r["sq"] for r in rows)
+
+    @dag
+    def fan():
+        with SubDAG("each", items=[1, 2, 3], params={"n": ITEM}) as each:
+            one(each.params.n)
+        gather(each.results)
+
+    steps = fan.to_dict()["steps"]
+    assert steps[1]["env"] == [{"DAGUFLOW_ARG_rows": "${EACH}"}], steps[1]
+    assert steps[1]["depends"] in ("each", ["each"]), steps[1]
+    aggregate = {"summary": {"total": 3, "succeeded": 3, "failed": 0}, "results": [],
+                 "outputs": [{"ONE": json.dumps({"n": n, "sq": n * n})} for n in (1, 2, 3)]}
+    proc = subprocess.run([sys.executable, "-"], input=_decoded_script(steps[1]["run"]), text=True,
+                          capture_output=True, env={**os.environ, "DAGUFLOW_ARG_rows": json.dumps(aggregate)})
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == 14
+
+
+def test_results_needs_a_fan_out_with_one_output():
+    import pytest
+
+    from daguflow import ITEM, SubDAG, dag, shell
+
+    with pytest.raises(TypeError, match="fan-out"):
+        @dag
+        def single():
+            with SubDAG("once") as once:
+                shell("echo hi", name="hi", output="HI")
+            once.results
+
+    with pytest.raises(TypeError, match="exactly one"):
+        @dag
+        def two():
+            with SubDAG("each", items=[1], params={"n": ITEM}) as each:
+                shell("echo a", name="a", output="A")
+                shell("echo b", name="b", output="B")
+            each.results
